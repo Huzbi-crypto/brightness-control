@@ -83,7 +83,7 @@ Set `intercept_wina=0` to keep the native Quick Settings on Win+A; the panel sta
 
 ## Verified on
 
-Windows 11 26H2 (build 26300) · Intel UHD Graphics + NVIDIA MX250 · Dell P2423D over HDMI · laptop panel via WMI. Idle cost is ~38 MB RAM and ~0.15 % of one core.
+Windows 11 26H2 (build 26300) · Intel UHD Graphics + NVIDIA MX250 · Dell P2423D over HDMI · laptop panel via WMI. Idle cost is ~40 MB RAM, ~0.2 % of one core, and 2.5 wakeups/s (the worker blocks on an event and only polls the panel on a timer).
 
 ## License
 

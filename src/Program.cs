@@ -50,6 +50,8 @@ namespace BrightnessControl
         private volatile bool _refreshNow;
 
         private readonly System.Windows.Forms.Timer _raiseTimer;
+        // Lets the UI wake the worker immediately instead of polling a short sleep.
+        private readonly AutoResetEvent _wake = new AutoResetEvent(false);
         private ToolStripMenuItem _menuLink;
         private ToolStripMenuItem _menuIntercept;
 
@@ -196,6 +198,7 @@ namespace BrightnessControl
         {
             _cachedInternal = v;
             _pendingInternal = v;
+            _wake.Set();
             if (_linked)
             {
                 _pendingExternal = v;
@@ -207,6 +210,7 @@ namespace BrightnessControl
         {
             _cachedExternal = v;
             _pendingExternal = v;
+            _wake.Set();
             if (_linked)
             {
                 _pendingInternal = v;
@@ -225,6 +229,7 @@ namespace BrightnessControl
             _linked = linked;
             SaveConfig();
             if (linked) _pendingExternal = _cachedInternal;
+            _wake.Set();
         }
 
         [DllImport("user32.dll")]
@@ -340,7 +345,9 @@ namespace BrightnessControl
                 }
                 catch { }
 
-                Thread.Sleep(active ? 30 : 90);
+                // 30 ms while work is in flight, otherwise wait for the next poll tick or a
+                // UI nudge. Idle wakeups drop from ~11/s to 2.5/s, which matters on battery.
+                _wake.WaitOne(active ? 30 : 400);
             }
         }
 
