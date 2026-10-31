@@ -191,7 +191,7 @@ namespace BrightnessControl
             {
                 try { Tick(); }
                 catch { }
-                Thread.Sleep(160);
+                Thread.Sleep(200);
             }
         }
 
@@ -257,7 +257,7 @@ namespace BrightnessControl
             if (!GetWindowRect(hwnd, out r)) { Log.Write("qs: GetWindowRect failed"); return; }
             Rectangle container = Rectangle.FromLTRB(r.L, r.T, r.R, r.B);
 
-            bool remeasure = (hwnd != _lastHwnd) || (Environment.TickCount - _lastMeasure > 900);
+            bool remeasure = (hwnd != _lastHwnd) || (Environment.TickCount - _lastMeasure > 2000);
             if (!remeasure && _lastBounds != Rectangle.Empty)
             {
                 PlaceCard(_lastBounds);
@@ -304,13 +304,18 @@ namespace BrightnessControl
             int left = container.Left + inset;
             int width = container.Width - inset * 2;
 
-            using (Bitmap strip = new Bitmap(container.Width, container.Height))
-            {
-                using (Graphics g = Graphics.FromImage(strip))
-                    g.CopyFromScreen(container.Left, container.Top, 0, 0, container.Size);
+            // Copy two 1 px columns rather than the whole 480x1400 container: the scan only
+            // needs one column inside the card and one in the container's padding.
+            int midX = container.Width / 2;
+            int padX = 8;
 
-                int midX = container.Width / 2;
-                int padX = 8; // inside the container, left of the card
+            using (Bitmap mid = new Bitmap(1, container.Height))
+            using (Bitmap pad = new Bitmap(1, container.Height))
+            {
+                using (Graphics g = Graphics.FromImage(mid))
+                    g.CopyFromScreen(container.Left + midX, container.Top, 0, 0, new Size(1, container.Height));
+                using (Graphics g = Graphics.FromImage(pad))
+                    g.CopyFromScreen(container.Left + padX, container.Top, 0, 0, new Size(1, container.Height));
 
                 // Stop just above our own card: everything below it is our own pixels or empty
                 // background, and including it makes the scan measure itself.
@@ -321,25 +326,24 @@ namespace BrightnessControl
                 int bottom = -1;
                 for (int y = startY; y > inset; y--)
                 {
-                    Color a = strip.GetPixel(midX, y);
-                    Color b = strip.GetPixel(padX, y);
+                    Color a = mid.GetPixel(0, y);
+                    Color b = pad.GetPixel(0, y);
                     int diff = Math.Abs(a.R - b.R) + Math.Abs(a.G - b.G) + Math.Abs(a.B - b.B);
-                    if (diff > 8)
+                    if (diff <= 8) continue;
+
+                    // require a few consistent rows so a stray shadow pixel does not win
+                    int run = 0;
+                    for (int k = 0; k < 6 && y - k > 0; k++)
                     {
-                        // require a few consistent rows so a stray shadow pixel does not win
-                        int run = 0;
-                        for (int k = 0; k < 6 && y - k > 0; k++)
-                        {
-                            Color a2 = strip.GetPixel(midX, y - k);
-                            Color b2 = strip.GetPixel(padX, y - k);
-                            if (Math.Abs(a2.R - b2.R) + Math.Abs(a2.G - b2.G) + Math.Abs(a2.B - b2.B) > 8) run++;
-                        }
-                        if (run >= 5) { bottom = y; break; }
+                        Color a2 = mid.GetPixel(0, y - k);
+                        Color b2 = pad.GetPixel(0, y - k);
+                        if (Math.Abs(a2.R - b2.R) + Math.Abs(a2.G - b2.G) + Math.Abs(a2.B - b2.B) > 8) run++;
                     }
+                    if (run >= 5) { bottom = y; break; }
                 }
 
                 if (bottom < 0) return Rectangle.Empty;
-                // 'bottom' is a row inside the captured strip; convert back to screen space.
+                // 'bottom' is a row inside the captured column; convert back to screen space.
                 return new Rectangle(left, container.Top + bottom + 1, width, QuickSettingsCard.CardHeight);
             }
         }
