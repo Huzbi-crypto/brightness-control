@@ -24,7 +24,7 @@ All hardware access runs on one worker thread. The UI thread only posts target v
 
 Windows exposes no brightness-change event (`WmiMonitorBrightnessEvent` never fires on current builds), so the worker polls the internal panel every 400 ms and drops to 120 ms for 1.5 s after any change, which is enough to track a slider drag smoothly.
 
-Win+A is intercepted with a `WH_KEYBOARD_LL` hook (the Win key-up is swallowed too, otherwise the shell treats the combo as a bare Win tap and opens Start). A `WH_MOUSE_LL` hook closes the panel on the next click outside it.
+Win+A is intercepted with a `WH_KEYBOARD_LL` hook. Only the `A` is swallowed; an unbound `F24` is injected between the Win down and up so the shell sees a combo rather than a bare Win tap and does not open Start. Modifier key-ups are never swallowed — doing that desyncs the OS modifier state and every later keystroke arrives as Win+key. A `WH_MOUSE_LL` hook closes the panel on the next click outside it.
 
 ## Requirements
 
