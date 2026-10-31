@@ -86,12 +86,16 @@ namespace BrightnessControl
         private readonly HookProc _mouseProc;
         private bool _swallowAUp;
 
-        public GlobalHooks()
+        /// <param name="withKeyboard">
+        /// Only install the keyboard hook when Win+A interception is actually wanted. It is off
+        /// by default now that brightness lives inside the real Quick Settings panel.
+        /// </param>
+        public GlobalHooks(bool withKeyboard)
         {
             _kbProc = KeyboardProc;
             _mouseProc = MouseProc;
             IntPtr mod = GetModuleHandle(null);
-            _kbHook = SetWindowsHookEx(WH_KEYBOARD_LL, _kbProc, mod, 0);
+            if (withKeyboard) _kbHook = SetWindowsHookEx(WH_KEYBOARD_LL, _kbProc, mod, 0);
             _mouseHook = SetWindowsHookEx(WH_MOUSE_LL, _mouseProc, mod, 0);
         }
 

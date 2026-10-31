@@ -13,9 +13,11 @@ namespace BrightnessControl
 
         public event EventHandler ValueChanged;
 
-        public static Color TrackColor = Color.FromArgb(82, 82, 82);
-        public static Color FillColor = Color.FromArgb(76, 194, 255);
-        public static Color KnobColor = Color.FromArgb(240, 240, 240);
+        // Sampled from the real Windows 11 Quick Settings sliders.
+        public static Color TrackColor = Color.FromArgb(157, 158, 159);
+        public static Color FillColor = Color.FromArgb(134, 196, 236);
+        public static Color KnobColor = Color.FromArgb(134, 196, 236);
+        public static Color KnobRing = Color.FromArgb(69, 69, 69);
 
         private const int Pad = 11;
         private const int TrackH = 5;
@@ -76,12 +78,12 @@ namespace BrightnessControl
                 }
             }
 
+            // Windows 11 draws the thumb as a grey disc with a smaller accent disc inside.
             Rectangle knob = new Rectangle(kx - KnobR, cy - KnobR, KnobR * 2, KnobR * 2);
-            using (SolidBrush b = new SolidBrush(KnobColor)) g.FillEllipse(b, knob);
-            if (_dragging)
-            {
-                using (Pen p = new Pen(FillColor, 2f)) g.DrawEllipse(p, knob);
-            }
+            using (SolidBrush b = new SolidBrush(KnobRing)) g.FillEllipse(b, knob);
+            int inner = KnobR - 3;
+            using (SolidBrush b = new SolidBrush(KnobColor))
+                g.FillEllipse(b, kx - inner, cy - inner, inner * 2, inner * 2);
         }
 
         private void SetFromMouse(int x)

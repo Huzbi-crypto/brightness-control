@@ -29,7 +29,7 @@ namespace BrightnessControl
 
         private bool _suppress;
 
-        private static readonly Color Bg = Color.FromArgb(32, 32, 32);
+        private static readonly Color Bg = Color.FromArgb(40, 42, 44);
         private static readonly Color Border = Color.FromArgb(60, 60, 60);
         private static readonly Color Fg = Color.FromArgb(255, 255, 255);
         private static readonly Color Muted = Color.FromArgb(168, 168, 168);
@@ -46,14 +46,14 @@ namespace BrightnessControl
             TopMost = true;
             StartPosition = FormStartPosition.Manual;
             AutoScaleMode = AutoScaleMode.None;
-            Font = new Font("Segoe UI", 9f);
+            Font = UiFont(9f);
             BackColor = Bg;
             ClientSize = new Size(PanelWidth, PanelHeight);
             DoubleBuffered = true;
             KeyPreview = true;
 
             StyleLabel(_lblHeader, "Brightness", Muted, ContentAlignment.MiddleLeft);
-            _lblHeader.Font = new Font("Segoe UI", 9f);
+            _lblHeader.Font = UiFont(9f);
 
             StyleLabel(_lblLaptop, "Laptop display", Muted, ContentAlignment.MiddleLeft);
             StyleLabel(_lblExt, externalName, Muted, ContentAlignment.MiddleLeft);
@@ -63,7 +63,7 @@ namespace BrightnessControl
 
             _lblLink.Cursor = Cursors.Hand;
             _lnkNative.Text = "Windows quick settings  \u203A";
-            _lnkNative.Font = new Font("Segoe UI", 9f);
+            _lnkNative.Font = UiFont(9f);
             _lnkNative.Click += delegate { if (OpenNativeRequested != null) OpenNativeRequested(); };
 
             _sliderLaptop.ValueChanged += delegate
@@ -93,6 +93,15 @@ namespace BrightnessControl
             LayoutControls();
         }
 
+        /// <summary>Segoe UI Variable is the Windows 11 UI font; fall back on older builds.</summary>
+        internal static Font UiFont(float size)
+        {
+            Font f = new Font("Segoe UI Variable Text", size);
+            if (f.Name == "Segoe UI Variable Text") return f;
+            f.Dispose();
+            return new Font("Segoe UI", size);
+        }
+
         private void StyleLabel(Label l, string text, Color color, ContentAlignment align)
         {
             l.Text = text;
@@ -100,7 +109,7 @@ namespace BrightnessControl
             l.BackColor = Color.Transparent;
             l.TextAlign = align;
             l.AutoSize = false;
-            l.Font = new Font("Segoe UI", 9.5f);
+            l.Font = UiFont(10f);
         }
 
         private void LayoutControls()
