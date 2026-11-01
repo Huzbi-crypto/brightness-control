@@ -188,6 +188,20 @@ static const IID kIPanel = { 0xa50a4bbd, 0x8361, 0x469c, { 0x90, 0xda, 0xe9, 0xa
 static const IID kIUIElement = { 0x676d0be9, 0xb65c, 0x41c6, { 0xba, 0x40, 0x58, 0xcf, 0x87, 0xf2, 0x01, 0xc1 } };
 static IInspectableABI* g_panelSliders[2] = { nullptr, nullptr };
 
+// IUIElement::put_Visibility is method 16 (slot 22).
+struct IUIElementVisibilityABI : IInspectableABI
+{
+    virtual void* v0(); virtual void* v1(); virtual void* v2(); virtual void* v3();
+    virtual void* v4(); virtual void* v5(); virtual void* v6(); virtual void* v7();
+    virtual void* v8(); virtual void* v9(); virtual void* v10(); virtual void* v11();
+    virtual void* v12(); virtual void* v13(); virtual void* v14();
+    virtual void* unusedGetVisibility();                            // slot 21
+    virtual HRESULT STDMETHODCALLTYPE put_Visibility(int value) = 0;  // slot 22
+};
+
+static IInspectableABI* g_monitorPanel = nullptr;
+static bool g_panelVisible = false;
+
 static const IID kIInspectable = { 0xaf86e2e0, 0xb12d, 0x4c6a, { 0x9c, 0x5a, 0xd7, 0xaa, 0x65, 0x10, 0x1e, 0x90 } };
 
 static void LogClassName(const wchar_t* label, IInspectableABI* object)
@@ -1330,9 +1344,22 @@ static const IID kIDispatcherQueueHandler = { 0xdfa2dc9c, 0x1a2d, 0x4917, { 0x98
 // support the IAgileObject interface".
 
 static void* g_pendingView = nullptr;
+static int g_pendingAction = 0;  // 0 = inspect, 1 = collapse panel
 
 static void DoDeferredInspect()
 {
+    if (g_pendingAction == 1) {
+        // Every time the flyout opens the panel starts collapsed. Without this
+        // it stays visible for the life of the process after the first chevron
+        // press, which is exactly how it looked on reopen.
+        if (g_monitorPanel) {
+            reinterpret_cast<IUIElementVisibilityABI*>(g_monitorPanel)->put_Visibility(1);
+            g_panelVisible = false;
+            Log(L"panel: collapsed on open");
+        }
+        return;
+    }
+
     void* view = g_pendingView;
     Log(L"deferred callback: view=0x%p", view);
     if (view)
@@ -1413,19 +1440,8 @@ static void QueueDeferredInspect(void* view)
 // Per-monitor panel, opened from the chevron
 // ---------------------------------------------------------------------------
 
-// IUIElement::put_Visibility is method 16 (slot 22).
-struct IUIElementVisibilityABI : IInspectableABI
-{
-    virtual void* v0(); virtual void* v1(); virtual void* v2(); virtual void* v3();
-    virtual void* v4(); virtual void* v5(); virtual void* v6(); virtual void* v7();
-    virtual void* v8(); virtual void* v9(); virtual void* v10(); virtual void* v11();
-    virtual void* v12(); virtual void* v13(); virtual void* v14();
-    virtual void* unusedGetVisibility();                            // slot 21
-    virtual HRESULT STDMETHODCALLTYPE put_Visibility(int value) = 0;  // slot 22
-};
 
-static IInspectableABI* g_monitorPanel = nullptr;
-static bool g_panelVisible = true;
+
 
 
 struct PanelSliderHandler : IUnknown
@@ -1763,10 +1779,17 @@ static void ShowMonitorPanel()
 static int Hook_OnGotFocus(void* self, void* args)
 {
     // Nothing XAML-touching here: capture the view, post the work, get out.
-    static bool queued = false;
-    if (!queued) {
-        queued = true;
-        Log(L"hook entered: this=0x%p", self);
+    Log(L"hook entered: this=0x%p", self);
+    if (!g_monitorPanel) {
+        static bool inspected = false;
+        if (!inspected) {
+            inspected = true;
+            g_pendingAction = 0;
+            QueueDeferredInspect(self);
+        }
+    } else {
+        // The panel already exists, so this open only has to hide it again.
+        g_pendingAction = 1;
         QueueDeferredInspect(self);
     }
     return g_onGotFocus(self, args);
