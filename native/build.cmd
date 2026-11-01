@@ -29,6 +29,10 @@ echo Building bcinject.exe ...
 cl /nologo /O2 /EHsc /W3 /DUNICODE /D_UNICODE /Fo:out\ /Fe:out\bcinject.exe src\injector.cpp /link /SUBSYSTEM:CONSOLE advapi32.lib
 if errorlevel 1 exit /b 1
 
+echo Building bcsync.exe ...
+cl /nologo /O2 /EHsc /W3 /DUNICODE /D_UNICODE /Fo:out\ /Fe:out\bcsync.exe src\bcsync.cpp /link /SUBSYSTEM:CONSOLE user32.lib dxva2.lib
+if errorlevel 1 exit /b 1
+
 echo.
 echo Built:
 dir /b out\*.dll out\*.exe

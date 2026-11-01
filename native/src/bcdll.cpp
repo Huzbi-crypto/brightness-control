@@ -304,119 +304,47 @@ static const IID kIRowDefinition = { 0x4abae829, 0xd80c, 0x4a5e, { 0xa4, 0x8c, 0
 static const IID kIGridStatics = { 0x64fe2e9f, 0xf951, 0x42b6, { 0xa9, 0xce, 0xbb, 0x17, 0x9a, 0xf1, 0x15, 0x95 } };
 
 // ---------------------------------------------------------------------------
-// DDC/CI for the external panel
+// Handing the level to bcsync.exe
+//
+// ShellHost cannot open physical monitors - GetPhysicalMonitorsFromHMONITOR
+// returns a null handle for every monitor here, though the same call works from
+// an ordinary process. So the DLL does not touch DDC at all: it publishes the
+// level in a shared page and signals a named event, and bcsync.exe does the
+// SetVCPFeature.
 // ---------------------------------------------------------------------------
 
-#include <physicalmonitorenumerationapi.h>
-#include <lowlevelmonitorconfigurationapi.h>
-#pragma comment(lib, "dxva2.lib")
+static const wchar_t* kMappingName = L"Local\\BrightnessControlSync";
+static const wchar_t* kEventName = L"Local\\BrightnessControlEvent";
 
-static HANDLE g_ddcEvent = nullptr;
-static volatile LONG g_pendingBrightness = -1;
-static PHYSICAL_MONITOR g_externalMonitor = {};
-static bool g_haveExternal = false;
-
-static BOOL CALLBACK FindExternalMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM)
+struct SharedState
 {
-    if (g_haveExternal)
-        return FALSE;
+    volatile LONG brightness;  // 0..100
+    volatile LONG sequence;    // bumped by the writer, for diagnostics
+};
 
-    // Pick by capability, not by "is it primary": on this machine the Dell is
-    // the primary display and the laptop panel is the one with no DDC handle.
-    MONITORINFO info = { sizeof(info) };
-    GetMonitorInfoW(monitor, &info);
-    Log(L"ddc: monitor %ld,%ld %ldx%ld primary=%d",
-        info.rcMonitor.left, info.rcMonitor.top,
-        info.rcMonitor.right - info.rcMonitor.left,
-        info.rcMonitor.bottom - info.rcMonitor.top,
-        (info.dwFlags & MONITORINFOF_PRIMARY) ? 1 : 0);
+static HANDLE g_mapping = nullptr;
+static HANDLE g_signal = nullptr;
+static SharedState* g_shared = nullptr;
 
-    DWORD count = 0;
-    if (!GetNumberOfPhysicalMonitorsFromHMONITOR(monitor, &count)) {
-        Log(L"ddc:   GetNumberOfPhysicalMonitors failed %lu", GetLastError());
-        return TRUE;
-    }
-    Log(L"ddc:   %lu physical monitor(s)", count);
-    if (count == 0)
-        return TRUE;
-
-    PHYSICAL_MONITOR* monitors = static_cast<PHYSICAL_MONITOR*>(
-        HeapAlloc(GetProcessHeap(), 0, count * sizeof(PHYSICAL_MONITOR)));
-    if (!monitors)
-        return TRUE;
-
-    if (GetPhysicalMonitorsFromHMONITOR(monitor, count, monitors)) {
-        for (DWORD i = 0; i < count && !g_haveExternal; ++i) {
-            if (!monitors[i].hPhysicalMonitor)
-                continue;
-            DWORD current = 0, maximum = 0;
-            BOOL ok = GetVCPFeatureAndVCPFeatureReply(monitors[i].hPhysicalMonitor, 0x10,
-                                                      nullptr, &current, &maximum);
-            Log(L"ddc:   [%lu] '%s' handle=0x%p vcp10=%d err=%lu",
-                i, monitors[i].szPhysicalMonitorDescription, monitors[i].hPhysicalMonitor,
-                ok ? 1 : 0, ok ? 0 : GetLastError());
-            if (ok) {
-                g_externalMonitor = monitors[i];
-                g_haveExternal = true;
-                Log(L"ddc: using '%s' (handle 0x%p), brightness %lu/%lu",
-                    monitors[i].szPhysicalMonitorDescription, monitors[i].hPhysicalMonitor,
-                    current, maximum);
-            }
-        }
-
-        for (DWORD i = 0; i < count; ++i) {
-            if (g_haveExternal && &monitors[i] == &g_externalMonitor)
-                continue;
-            if (g_haveExternal && monitors[i].hPhysicalMonitor == g_externalMonitor.hPhysicalMonitor)
-                continue;
-            DestroyPhysicalMonitor(monitors[i].hPhysicalMonitor);
-        }
-    } else {
-        Log(L"ddc: GetPhysicalMonitorsFromHMONITOR failed %lu", GetLastError());
-    }
-
-    HeapFree(GetProcessHeap(), 0, monitors);
-    return g_haveExternal ? FALSE : TRUE;
-}
-
-static void SetExternalBrightness(int value)
+static void InitSync()
 {
-    if (!g_haveExternal) {
-        EnumDisplayMonitors(nullptr, nullptr, FindExternalMonitor, 0);
-        if (!g_haveExternal) {
-            Log(L"ddc: no external monitor found");
-            return;
-        }
-    }
-    DWORD current = 0, maximum = 100;
-    if (!SetVCPFeature(g_externalMonitor.hPhysicalMonitor, 0x10, static_cast<DWORD>(value))) {
-        Log(L"ddc: SetVCPFeature failed %lu", GetLastError());
-        g_haveExternal = false;  // re-enumerate next time
-    }
-    (void)current;
-    (void)maximum;
-}
-
-static DWORD WINAPI DdcWorker(LPVOID)
-{
-    for (;;) {
-        WaitForSingleObject(g_ddcEvent, INFINITE);
-        // Coalesce: only the newest value matters while the user drags.
-        LONG value = InterlockedExchange(&g_pendingBrightness, -1);
-        while (value >= 0) {
-            SetExternalBrightness(static_cast<int>(value));
-            value = InterlockedExchange(&g_pendingBrightness, -1);
-        }
-    }
+    g_mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
+                                   0, sizeof(SharedState), kMappingName);
+    if (g_mapping)
+        g_shared = static_cast<SharedState*>(
+            MapViewOfFile(g_mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedState)));
+    g_signal = CreateEventW(nullptr, FALSE, FALSE, kEventName);
+    Log(L"sync: mapping=0x%p shared=0x%p event=0x%p", g_mapping, g_shared, g_signal);
 }
 
 static void QueueExternalBrightness(double value)
 {
+    if (!g_shared || !g_signal)
+        return;
     if (value < 0) value = 0;
     if (value > 100) value = 100;
-    InterlockedExchange(&g_pendingBrightness, static_cast<LONG>(value));
-    if (g_ddcEvent)
-        SetEvent(g_ddcEvent);
+    g_shared->brightness = static_cast<LONG>(value);
+    SetEvent(g_signal);
 }
 
 // ---------------------------------------------------------------------------
@@ -501,8 +429,6 @@ static void AttachStockSlider()
     Log(L"stock slider: add_ValueChanged 0x%08X", hr);
     range->Release();
 
-    // Push the current level to the external panel once, so the two agree
-    // before the user touches anything.
     QueueExternalBrightness(value);
 }
 
@@ -1151,12 +1077,7 @@ static DWORD WINAPI InitThread(LPVOID module)
     // tells us which discovery path to take next.
     ResolveHStringHelpers();
 
-    g_ddcEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (g_ddcEvent) {
-        HANDLE thread = CreateThread(nullptr, 0, DdcWorker, nullptr, 0, nullptr);
-        if (thread)
-            CloseHandle(thread);
-    }
+    InitSync();
 
     HMODULE controlCenter = GetModuleHandleW(L"ControlCenter.dll");
     Log(L"ControlCenter.dll %s (0x%p)",
