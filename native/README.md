@@ -260,6 +260,15 @@ The row now renders inside the panel, below the battery/settings row. `SetRow`
 on the factory's static interface still faults even with a correct `IUIElement`,
 so the dependency-property route is what is used.
 
-Remaining polish: the row sits after the footer because it is appended as the
-last RowDefinition. To sit between the volume slider and the footer it has to go
-in row 2 with the footer shifted to row 3.
+The row goes in at row 2 - under the volume slider - and the footer is pushed
+into the appended row 3 to make space:
+
+```
+insert: SetValue(Grid.Row, 2) 0x00000000
+insert: append panel to L1Grid 0x00000000
+insert: L1Grid children 4 -> 5
+insert: footer SetValue(Grid.Row, 3) 0x00000000
+```
+
+Verified on screen: the row sits between the volume slider and the
+battery/settings row, and ShellHost survives repeated open/close cycles.

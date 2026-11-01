@@ -497,7 +497,11 @@ static void InsertPanelIntoGrid()
     Log(L"insert: append RowDefinition 0x%08X", hr);
     rowDefinition->Release();
 
-    unsigned newRow = rowCount;
+    // Rows 0..2 are the shell's (toggles, sliders, footer). Ours goes in row 2
+    // so it sits under the volume slider, and the footer moves to the appended
+    // row 3 to make room.
+    unsigned newRow = (rowCount >= 2) ? 2u : rowCount;
+    unsigned footerRow = rowCount;
 
     IInspectableABI* panel = Activate(L"Windows.UI.Xaml.Controls.StackPanel");
     if (!panel) {
@@ -589,6 +593,53 @@ static void InsertPanelIntoGrid()
             Log(L"insert: append panel to L1Grid 0x%08X", hr);
             children->get_Size(&after);
             Log(L"insert: L1Grid children %u -> %u", before, after);
+
+            // Push the footer down into the row we appended.
+            IInspectableABI* footer = nullptr;
+            if (SUCCEEDED(children->GetAt(3, &footer)) && footer) {
+                IInspectableABI* footerObject = nullptr;
+                if (SUCCEEDED(footer->QueryInterface(kIDependencyObject, reinterpret_cast<void**>(&footerObject))) && footerObject) {
+                    HSTRING gridName2 = nullptr;
+                    const wchar_t* gridClass2 = L"Windows.UI.Xaml.Controls.Grid";
+                    g_createString(gridClass2, static_cast<UINT32>(wcslen(gridClass2)), &gridName2);
+                    void* gridFactory2 = nullptr;
+                    if (SUCCEEDED(g_roGetActivationFactory(gridName2, kIActivationFactory, &gridFactory2)) && gridFactory2) {
+                        IGridStaticsABI* statics2 = nullptr;
+                        if (SUCCEEDED(reinterpret_cast<IInspectableABI*>(gridFactory2)->QueryInterface(
+                                kIGridStatics, reinterpret_cast<void**>(&statics2))) && statics2) {
+                            IDependencyObjectABI* rowProperty2 = nullptr;
+                            if (SUCCEEDED(statics2->get_RowProperty(&rowProperty2)) && rowProperty2) {
+                                HSTRING pvName2 = nullptr;
+                                const wchar_t* pvClass2 = L"Windows.Foundation.PropertyValue";
+                                g_createString(pvClass2, static_cast<UINT32>(wcslen(pvClass2)), &pvName2);
+                                void* pvFactory2 = nullptr;
+                                if (SUCCEEDED(g_roGetActivationFactory(pvName2, kIActivationFactory, &pvFactory2)) && pvFactory2) {
+                                    IPropertyValueStaticsABI* pv2 = nullptr;
+                                    if (SUCCEEDED(reinterpret_cast<IInspectableABI*>(pvFactory2)->QueryInterface(
+                                            kIPropertyValueStatics, reinterpret_cast<void**>(&pv2))) && pv2) {
+                                        IInspectableABI* boxed2 = nullptr;
+                                        if (SUCCEEDED(pv2->CreateInt32(static_cast<int>(footerRow), &boxed2)) && boxed2) {
+                                            HRESULT hrFooter = reinterpret_cast<IDependencyObjectSetValueABI*>(footerObject)
+                                                                   ->SetValue(rowProperty2, boxed2);
+                                            Log(L"insert: footer SetValue(Grid.Row, %u) 0x%08X", footerRow, hrFooter);
+                                            boxed2->Release();
+                                        }
+                                        pv2->Release();
+                                    }
+                                    reinterpret_cast<IInspectableABI*>(pvFactory2)->Release();
+                                }
+                                g_deleteString(pvName2);
+                                rowProperty2->Release();
+                            }
+                            statics2->Release();
+                        }
+                        reinterpret_cast<IInspectableABI*>(gridFactory2)->Release();
+                    }
+                    g_deleteString(gridName2);
+                    footerObject->Release();
+                }
+                footer->Release();
+            }
             gridChildren->Release();
         }
         gridPanel->Release();
