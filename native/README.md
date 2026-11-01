@@ -302,3 +302,26 @@ free and it reads the Dell immediately.
 so its `PHYSICAL_MONITOR` is 136 bytes instead of 264. The handle happens to be
 first, so it read a valid handle out of a buffer the API overflowed. That is why
 the same enumeration appeared to work from a managed process and fail natively.
+
+## The per-monitor panel
+
+The chevron opens a panel with one labelled slider per display. It is built as a
+StackPanel and added to L1Grid as its own row, the same way the brightness row
+goes in.
+
+Each slider has its own `IRangeBase` handler carrying a monitor id. The laptop
+one drives the shell's own slider (which is how the internal panel gets set) with
+`g_suspendMirror` held, so the mirror path does not immediately copy it back to
+the Dell. The external one goes straight to `bcsync`.
+
+Verified:
+
+```
+Dell slider -> low     : internal 72  dell 2     (laptop untouched)
+This display -> high   : internal 100 dell 2     (Dell untouched)
+stock slider -> 60     : internal 60  dell 60    (mirroring restored)
+panel: toggled visible=0 / visible=1
+```
+
+So the shell's brightness slider moves both panels together, and the chevron
+gives individual control without unlinking them permanently.
