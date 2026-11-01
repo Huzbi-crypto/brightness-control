@@ -14,11 +14,26 @@ running inside `ShellHost`; the XAML work comes after that.
 
 | Step | State |
 |---|---|
-| Injector loads a DLL into `ShellHost.exe` | in progress |
-| DLL reports from inside the host | in progress |
-| Catch `ControlCenter.dll`, hook the view lifecycle | not started |
+| Injector loads a DLL into `ShellHost.exe` | **done** - verified, logs from pid 10432 |
+| DLL reports from inside the host | **done** |
+| Hook the view lifecycle to get the XAML root | next |
 | Insert the brightness row (WinRT XAML) | not started |
 | Wire the row to DDC/CI | not started |
+
+### What the next step has to hook
+
+The panel's root comes from `ControlCenterView` inside `ControlCenter.dll`, via
+two of its **virtual** functions (not exports):
+
+- `...::produce<ControlCenterView, IControlOverrides>::OnGotFocus(void*)`
+- `...::produce<ControlCenterView, IComponentConnector>::Connect(int, void*)`
+
+Both receive the implementation object, from which the XAML tree is reachable.
+The reference resolves these by decorated name through Windhawk's symbol
+server, which we do not have. The RTTI type descriptor for `ControlCenterView`
+is present in the DLL (offset `0x35B2F8`), so the plan is to find the vtable
+through RTTI and identify the two slots empirically - hook the candidates,
+open the panel, see which fire with that signature.
 
 ## Layout
 
