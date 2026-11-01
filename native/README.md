@@ -325,3 +325,25 @@ panel: toggled visible=0 / visible=1
 
 So the shell's brightness slider moves both panels together, and the chevron
 gives individual control without unlinking them permanently.
+
+## Panel behaviour fixes
+
+Three bugs from real use:
+
+**The panel was always visible.** It is now built hidden and shown by the chevron,
+and it goes in at row 2 with the footer pushed to row 3, so it opens between the
+sliders and the battery row instead of sitting below the footer. It was also
+being built and *then* collapsed on the first click, so the first press appeared
+to do nothing; it now builds visible when the press is what triggered it.
+
+**The panel sliders did not follow the stock slider.** The mirror handler now
+pushes the new level into both panel sliders with `g_suspendMirror` held, so the
+shell slider moves all three and the panel sliders cannot drift.
+
+**The glyph.** It is a real Segoe Fluent Icons chevron (E76C) with the family set
+explicitly, in a button large enough that the glyph is not clipped - 28x28 was
+too small and rendered an empty box. A composite display+chevron icon was tried
+and abandoned: building it in a helper function faulted ShellHost on
+`put_FontFamily`/`put_Foreground` calls that work when made inline, and the cause
+was not found. Borrowing the shell's own AnimatedIcon Lottie, the way the
+per-monitor-brightness mod does, is the way to get a genuinely native icon.

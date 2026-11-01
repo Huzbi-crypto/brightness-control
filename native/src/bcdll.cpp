@@ -186,6 +186,8 @@ struct IVectorABI : IInspectableABI
 static const IID kIContentControl = { 0xa26dd1dc, 0xcd44, 0x435c, { 0xbe, 0x94, 0x01, 0xd6, 0x24, 0x1c, 0x23, 0x1c } };
 static const IID kIPanel = { 0xa50a4bbd, 0x8361, 0x469c, { 0x90, 0xda, 0xe9, 0xa4, 0x0c, 0x74, 0x74, 0xdf } };
 static const IID kIUIElement = { 0x676d0be9, 0xb65c, 0x41c6, { 0xba, 0x40, 0x58, 0xcf, 0x87, 0xf2, 0x01, 0xc1 } };
+static IInspectableABI* g_panelSliders[2] = { nullptr, nullptr };
+
 static const IID kIInspectable = { 0xaf86e2e0, 0xb12d, 0x4c6a, { 0x9c, 0x5a, 0xd7, 0xaa, 0x65, 0x10, 0x1e, 0x90 } };
 
 static void LogClassName(const wchar_t* label, IInspectableABI* object)
@@ -404,8 +406,23 @@ struct ValueChangedHandler : IUnknown
         IRangeBaseABI* range = nullptr;
         if (sender && SUCCEEDED(sender->QueryInterface(kIRangeBase, reinterpret_cast<void**>(&range))) && range) {
             double value = 0;
-            if (SUCCEEDED(range->get_Value(&value)) && !g_suspendMirror)
+            if (SUCCEEDED(range->get_Value(&value)) && !g_suspendMirror) {
                 QueueExternalBrightness(value);
+
+                // The stock slider moves both panels, so the per-monitor sliders
+                // have to show the new level instead of drifting out of date.
+                g_suspendMirror = true;
+                for (int i = 0; i < 2; ++i) {
+                    IRangeBaseABI* panelRange = nullptr;
+                    if (g_panelSliders[i] &&
+                        SUCCEEDED(g_panelSliders[i]->QueryInterface(kIRangeBase, reinterpret_cast<void**>(&panelRange))) &&
+                        panelRange) {
+                        panelRange->put_Value(value);
+                        panelRange->Release();
+                    }
+                }
+                g_suspendMirror = false;
+            }
             range->Release();
         }
         return S_OK;
@@ -416,6 +433,7 @@ static ValueChangedHandler g_valueChangedHandler;
 static IDependencyObjectABI* g_stockSlider = nullptr;
 
 static void BuildChevron();
+static void AppendChild(IInspectableABI* parent, IInspectableABI* child);
 
 static void AttachStockSlider()
 {
@@ -664,6 +682,31 @@ struct IButtonBaseABI : IInspectableABI
     virtual HRESULT STDMETHODCALLTYPE add_Click(void* handler, INT64* token) = 0;  // slot 14
 };
 
+// IControl: put_Background is method 31 (slot 37), put_BorderBrush 32 (slot 38).
+struct IControlABI : IInspectableABI
+{
+    virtual void* c0(); virtual void* c1(); virtual void* c2(); virtual void* c3();
+    virtual void* c4(); virtual void* c5(); virtual void* c6(); virtual void* c7();
+    virtual void* c8(); virtual void* c9(); virtual void* c10(); virtual void* c11();
+    virtual void* c12(); virtual void* c13(); virtual void* c14(); virtual void* c15();
+    virtual void* c16(); virtual void* c17(); virtual void* c18(); virtual void* c19();
+    virtual void* c20(); virtual void* c21(); virtual void* c22(); virtual void* c23();
+    virtual void* c24(); virtual void* c25(); virtual void* c26(); virtual void* c27();
+    virtual void* c28(); virtual void* c29(); virtual void* c30();
+    virtual HRESULT STDMETHODCALLTYPE put_Background(IInspectableABI* value) = 0;   // slot 37
+    virtual HRESULT STDMETHODCALLTYPE put_BorderBrush(IInspectableABI* value) = 0;  // slot 38
+};
+
+// IStackPanel: put_Orientation is method 3 (slot 9).
+struct IStackPanelABI : IInspectableABI
+{
+    virtual void* s0(); virtual void* s1(); virtual void* s2();
+    virtual HRESULT STDMETHODCALLTYPE put_Orientation(int value) = 0;  // slot 9
+};
+
+static const IID kIControl = { 0xa8912263, 0x2951, 0x4f58, { 0xa9, 0xc5, 0x5a, 0x13, 0x4e, 0xaa, 0x7f, 0x07 } };
+static const IID kIStackPanel = { 0xb8ae8fe2, 0xd641, 0x4fd7, { 0x80, 0xb4, 0x74, 0x39, 0x20, 0x7d, 0x27, 0x98 } };
+
 static const IID kITextBlock = { 0xae2d9271, 0x3b4a, 0x45fc, { 0x84, 0x68, 0xf7, 0x94, 0x95, 0x48, 0xf4, 0xd5 } };
 static const IID kIButtonBase = { 0xfa002c1a, 0x494e, 0x46cf, { 0x91, 0xd4, 0xe1, 0x4a, 0x8d, 0x79, 0x86, 0x74 } };
 static const IID kIRoutedEventHandler = { 0x68e0e810, 0xf6ea, 0x42bc, { 0x85, 0x5b, 0x5d, 0x9b, 0x67, 0xe6, 0xa2, 0x62 } };
@@ -735,16 +778,13 @@ static void BuildChevron()
         ITextBlockABI* textBlock = nullptr;
         if (SUCCEEDED(text->QueryInterface(kITextBlock, reinterpret_cast<void**>(&textBlock))) && textBlock) {
             HSTRING glyph = nullptr;
-            const wchar_t* chevron = L"\xE76C";  // Segoe Fluent: ChevronRight
+            const wchar_t* chevron = L"\xE76C";  // Segoe Fluent Icons: ChevronRight
             g_createString(chevron, 1, &glyph);
             HRESULT hrText = textBlock->put_Text(glyph);
             Log(L"chevron: put_Text 0x%08X", hrText);
             g_deleteString(glyph);
+            textBlock->put_FontSize(14);
 
-            // Segoe Fluent Icons ships with Windows 11, so E76C draws a real
-            // chevron - but only once the TextBlock is told to use that family.
-            // Without it the codepoint falls back to a box.
-            textBlock->put_FontSize(16);
             IInspectableABI* fontFamily = MakeFontFamily(L"Segoe Fluent Icons");
             if (fontFamily) {
                 HRESULT hrFont = textBlock->put_FontFamily(fontFamily);
@@ -752,7 +792,6 @@ static void BuildChevron()
                 fontFamily->Release();
             }
 
-            // A TextBlock defaults to black, which is invisible on the panel.
             IInspectableABI* brush = Activate(L"Windows.UI.Xaml.Media.SolidColorBrush");
             if (brush) {
                 ISolidColorBrushABI* solid = nullptr;
@@ -788,7 +827,8 @@ static void BuildChevron()
 
     IFrameworkElementABI* element = nullptr;
     if (SUCCEEDED(button->QueryInterface(kIFrameworkElement, reinterpret_cast<void**>(&element))) && element) {
-        element->put_Width(36);
+        // Big enough that the glyph is not clipped by the button's padding.
+        element->put_Width(40);
         element->put_Height(32);
         element->put_HorizontalAlignment(2);  // Right
         element->Release();
@@ -1409,6 +1449,9 @@ struct PanelSliderHandler : IUnknown
 
     virtual HRESULT STDMETHODCALLTYPE Invoke(IInspectableABI* sender, void*)
     {
+        if (g_suspendMirror)
+            return S_OK;  // we are writing this value in, not reacting to the user
+
         IRangeBaseABI* range = nullptr;
         if (!sender || FAILED(sender->QueryInterface(kIRangeBase, reinterpret_cast<void**>(&range))) || !range)
             return S_OK;
@@ -1503,6 +1546,54 @@ static void AppendChild(IInspectableABI* parent, IInspectableABI* child)
     panel->Release();
 }
 
+// Grid.Row through the dependency property: the static setter faults.
+static void SetGridRow(IInspectableABI* element, int row)
+{
+    if (!element)
+        return;
+    HSTRING gridName = nullptr;
+    const wchar_t* gridClass = L"Windows.UI.Xaml.Controls.Grid";
+    g_createString(gridClass, static_cast<UINT32>(wcslen(gridClass)), &gridName);
+    void* gridFactory = nullptr;
+    if (SUCCEEDED(g_roGetActivationFactory(gridName, kIActivationFactory, &gridFactory)) && gridFactory) {
+        IGridStaticsABI* statics = nullptr;
+        if (SUCCEEDED(reinterpret_cast<IInspectableABI*>(gridFactory)->QueryInterface(
+                kIGridStatics, reinterpret_cast<void**>(&statics))) && statics) {
+            IDependencyObjectABI* rowProperty = nullptr;
+            if (SUCCEEDED(statics->get_RowProperty(&rowProperty)) && rowProperty) {
+                IInspectableABI* object = nullptr;
+                if (SUCCEEDED(element->QueryInterface(kIDependencyObject, reinterpret_cast<void**>(&object))) && object) {
+                    HSTRING pvName = nullptr;
+                    const wchar_t* pvClass = L"Windows.Foundation.PropertyValue";
+                    g_createString(pvClass, static_cast<UINT32>(wcslen(pvClass)), &pvName);
+                    void* pvFactory = nullptr;
+                    if (SUCCEEDED(g_roGetActivationFactory(pvName, kIActivationFactory, &pvFactory)) && pvFactory) {
+                        IPropertyValueStaticsABI* pv = nullptr;
+                        if (SUCCEEDED(reinterpret_cast<IInspectableABI*>(pvFactory)->QueryInterface(
+                                kIPropertyValueStatics, reinterpret_cast<void**>(&pv))) && pv) {
+                            IInspectableABI* boxed = nullptr;
+                            if (SUCCEEDED(pv->CreateInt32(row, &boxed)) && boxed) {
+                                HRESULT hr = reinterpret_cast<IDependencyObjectSetValueABI*>(object)
+                                                 ->SetValue(rowProperty, boxed);
+                                Log(L"gridrow: SetValue(%d) 0x%08X", row, hr);
+                                boxed->Release();
+                            }
+                            pv->Release();
+                        }
+                        reinterpret_cast<IInspectableABI*>(pvFactory)->Release();
+                    }
+                    g_deleteString(pvName);
+                    object->Release();
+                }
+                rowProperty->Release();
+            }
+            statics->Release();
+        }
+        reinterpret_cast<IInspectableABI*>(gridFactory)->Release();
+    }
+    g_deleteString(gridName);
+}
+
 // Puts the panel in its own row of L1Grid, the same way the brightness row goes in.
 static void AddPanelRow(IInspectableABI* content)
 {
@@ -1520,6 +1611,9 @@ static void AddPanelRow(IInspectableABI* content)
         unsigned count = 0;
         rows->get_Size(&count);
 
+        // Row 2 is the footer, so insert at 2 and push the footer down to 3.
+        // Appending instead would put the panel below the battery row.
+        const unsigned insertAt = 2;
         IInspectableABI* rowDefinition = Activate(L"Windows.UI.Xaml.Controls.RowDefinition");
         if (rowDefinition) {
             IRowDefinitionABI* row = nullptr;
@@ -1528,10 +1622,14 @@ static void AddPanelRow(IInspectableABI* content)
                 row->put_Height(autoHeight);
                 row->Release();
             }
-            rows->Append(rowDefinition);
+            if (count > insertAt)
+                rows->InsertAt(insertAt, rowDefinition);
+            else
+                rows->Append(rowDefinition);
             rowDefinition->Release();
         }
         rowsRaw->Release();
+        count = insertAt;
 
         // Grid.Row via the property, same as the brightness row.
         HSTRING gridName = nullptr;
@@ -1578,6 +1676,22 @@ static void AddPanelRow(IInspectableABI* content)
 
         AppendChild(reinterpret_cast<IInspectableABI*>(g_l1Grid), content);
         Log(L"panel: added to L1Grid as row %u", count);
+
+        // The footer used to be row 2; it now belongs one below the panel.
+        IPanelABI* gridPanel = nullptr;
+        if (SUCCEEDED(reinterpret_cast<IInspectableABI*>(g_l1Grid)->QueryInterface(
+                kIPanel, reinterpret_cast<void**>(&gridPanel))) && gridPanel) {
+            IInspectableABI* children = nullptr;
+            if (SUCCEEDED(gridPanel->get_Children(&children)) && children) {
+                IInspectableABI* footer = nullptr;
+                if (SUCCEEDED(reinterpret_cast<IVectorABI*>(children)->GetAt(3, &footer)) && footer) {
+                    SetGridRow(footer, static_cast<int>(count + 1));
+                    footer->Release();
+                }
+                children->Release();
+            }
+            gridPanel->Release();
+        }
     }
     grid->Release();
 }
@@ -1618,6 +1732,8 @@ static void ShowMonitorPanel()
     }
     if (IInspectableABI* slider = MakeSlider(internalLevel, 0)) {
         AppendChild(panel, slider);
+        g_panelSliders[0] = slider;
+        slider->AddRef();
         slider->Release();
     }
     if (IInspectableABI* label = MakeLabel(L"Dell P2423D")) {
@@ -1626,13 +1742,21 @@ static void ShowMonitorPanel()
     }
     if (IInspectableABI* slider = MakeSlider(externalLevel, 1)) {
         AppendChild(panel, slider);
+        g_panelSliders[1] = slider;
+        slider->AddRef();
         slider->Release();
     }
 
     AddPanelRow(panel);
     g_monitorPanel = panel;
+
+    // Collapsed until the chevron is pressed, which is the whole point of
+    // putting it behind a button.
+    // Built hidden so the panel is not in the flyout until asked for, then
+    // shown immediately: this call came from the chevron.
+    reinterpret_cast<IUIElementVisibilityABI*>(panel)->put_Visibility(0);
     g_panelVisible = true;
-    Log(L"panel: built");
+    Log(L"panel: built (visible)");
 }
 
 
