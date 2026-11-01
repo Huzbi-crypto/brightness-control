@@ -134,3 +134,27 @@ This is why the mod has to be disabled while developing:
 Set-ItemProperty HKLM:\SOFTWARE\Windhawk\Engine\Mods\per-monitor-brightness -Name Disabled -Value 1
 Restart-Service Windhawk -Force
 ```
+
+## What the view actually is
+
+`GetRuntimeClassName` gives `ControlCenter.ControlCenterView`, and `GetIids`
+gives 53 interfaces. The relevant ones, resolved against the SDK headers:
+
+| Interface | Present |
+|---|---|
+| `IUserControl` | yes |
+| `IControl` (+2..7) | yes |
+| `IFrameworkElement` (+2..7) | yes |
+| `IUIElement` (+2..10) | yes |
+| `IDependencyObject` (+2) | yes |
+| `IComponentConnector` (+2) | yes |
+| `IControlOverrides`, `IUIElementOverrides*` | yes |
+| **`IContentControl`** | **no** - `QI` returns `0x80004002` |
+
+That last row is the useful part. Despite the `UserControl` shape, the class does
+not implement `IContentControl`, so there is no `Content` property to read the
+panel's root from. The way in is `VisualTreeHelper` on the view itself, which is
+a `UIElement` - walk its visual children until the card container turns up.
+
+`IComponentConnector` being present also confirms `Connect` is a real hook
+target, matching what the PDB said.

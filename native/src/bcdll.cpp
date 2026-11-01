@@ -6,6 +6,8 @@
 #include <windows.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <hstring.h>
+#pragma comment(lib, "ole32.lib")
 
 static void Log(const wchar_t* format, ...)
 {
@@ -106,9 +108,161 @@ static void* InstallDetour(BYTE* target, int stealLength, const void* hook)
 typedef int (*OnGotFocusFn)(void* self, void* args);
 static OnGotFocusFn g_onGotFocus = nullptr;
 
+// ---------------------------------------------------------------------------
+// WinRT ABI, declared minimally - just the interfaces the walk needs
+// ---------------------------------------------------------------------------
+
+// combase.lib is not shipped with the Build Tools, so resolve the two string
+// helpers out of combase.dll at run time.
+typedef PCWSTR (WINAPI* GetStringRawBufferFn)(HSTRING, UINT32*);
+typedef HRESULT (WINAPI* DeleteStringFn)(HSTRING);
+static GetStringRawBufferFn g_getStringRawBuffer = nullptr;
+static DeleteStringFn g_deleteString = nullptr;
+
+static void ResolveHStringHelpers()
+{
+    HMODULE combase = GetModuleHandleW(L"combase.dll");
+    if (!combase)
+        combase = LoadLibraryW(L"combase.dll");
+    if (!combase)
+        return;
+    g_getStringRawBuffer = reinterpret_cast<GetStringRawBufferFn>(
+        GetProcAddress(combase, "WindowsGetStringRawBuffer"));
+    g_deleteString = reinterpret_cast<DeleteStringFn>(
+        GetProcAddress(combase, "WindowsDeleteString"));
+}
+
+struct IInspectableABI : IUnknown
+{
+    virtual HRESULT STDMETHODCALLTYPE GetIids(ULONG* count, IID** iids) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetRuntimeClassName(HSTRING* name) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetTrustLevel(int* level) = 0;
+};
+
+// a26dd1dc-cd44-435c-be94-01d6241c231c
+struct IContentControlABI : IInspectableABI
+{
+    virtual HRESULT STDMETHODCALLTYPE get_Content(IInspectableABI** value) = 0;
+};
+
+// a50a4bbd-8361-469c-90da-e9a40c7474df
+struct IPanelABI : IInspectableABI
+{
+    virtual HRESULT STDMETHODCALLTYPE get_Children(IInspectableABI** value) = 0;
+};
+
+// IVector<T>: GetAt, get_Size, GetView, IndexOf, ...
+struct IVectorABI : IInspectableABI
+{
+    virtual HRESULT STDMETHODCALLTYPE GetAt(unsigned index, IInspectableABI** item) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_Size(unsigned* size) = 0;
+};
+
+static const IID kIContentControl = { 0xa26dd1dc, 0xcd44, 0x435c, { 0xbe, 0x94, 0x01, 0xd6, 0x24, 0x1c, 0x23, 0x1c } };
+static const IID kIPanel = { 0xa50a4bbd, 0x8361, 0x469c, { 0x90, 0xda, 0xe9, 0xa4, 0x0c, 0x74, 0x74, 0xdf } };
+static const IID kIInspectable = { 0xaf86e2e0, 0xb12d, 0x4c6a, { 0x9c, 0x5a, 0xd7, 0xaa, 0x65, 0x10, 0x1e, 0x90 } };
+
+static void LogClassName(const wchar_t* label, IInspectableABI* object)
+{
+    if (!object) {
+        Log(L"%s: <null>", label);
+        return;
+    }
+    HSTRING name = nullptr;
+    if (SUCCEEDED(object->GetRuntimeClassName(&name)) && name) {
+        UINT32 length = 0;
+        const wchar_t* raw = g_getStringRawBuffer ? g_getStringRawBuffer(name, &length) : L"<?>";
+        Log(L"%s: %s", label, raw);
+        if (g_deleteString)
+            g_deleteString(name);
+    } else {
+        Log(L"%s: <no runtime class name>", label);
+    }
+}
+
+static void InspectView(void* self)
+{
+    auto inspectable = reinterpret_cast<IInspectableABI*>(self);
+
+    LogClassName(L"view class", inspectable);
+
+    // Dump the interface list: the view is not a ContentControl, so the way to
+    // its children has to come from what it actually implements.
+    ULONG iidCount = 0;
+    IID* iids = nullptr;
+    if (SUCCEEDED(inspectable->GetIids(&iidCount, &iids)) && iids) {
+        for (ULONG i = 0; i < iidCount; ++i) {
+            const IID& id = iids[i];
+            Log(L"  iid {%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
+                id.Data1, id.Data2, id.Data3,
+                id.Data4[0], id.Data4[1], id.Data4[2], id.Data4[3],
+                id.Data4[4], id.Data4[5], id.Data4[6], id.Data4[7]);
+        }
+        CoTaskMemFree(iids);
+    }
+
+    IPanelABI* selfPanel = nullptr;
+    HRESULT selfHr = inspectable->QueryInterface(kIPanel, reinterpret_cast<void**>(&selfPanel));
+    Log(L"QI IPanel on view: 0x%08X", selfHr);
+    if (SUCCEEDED(selfHr) && selfPanel) {
+        IInspectableABI* children = nullptr;
+        if (SUCCEEDED(selfPanel->get_Children(&children)) && children) {
+            IVectorABI* vector = nullptr;
+            if (SUCCEEDED(children->QueryInterface(kIInspectable, reinterpret_cast<void**>(&vector)))) {
+                unsigned count = 0;
+                if (SUCCEEDED(vector->get_Size(&count)))
+                    Log(L"  view children: %u", count);
+                vector->Release();
+            }
+            children->Release();
+        }
+        selfPanel->Release();
+    }
+
+    IContentControlABI* contentControl = nullptr;
+    HRESULT hr = inspectable->QueryInterface(kIContentControl, reinterpret_cast<void**>(&contentControl));
+    Log(L"QI IContentControl: 0x%08X", hr);
+    if (FAILED(hr) || !contentControl)
+        return;
+
+    IInspectableABI* content = nullptr;
+    hr = contentControl->get_Content(&content);
+    Log(L"get_Content: 0x%08X", hr);
+    contentControl->Release();
+
+    if (FAILED(hr) || !content)
+        return;
+
+    LogClassName(L"  content class", content);
+
+    IPanelABI* panel = nullptr;
+    hr = content->QueryInterface(kIPanel, reinterpret_cast<void**>(&panel));
+    Log(L"  QI IPanel: 0x%08X", hr);
+    if (SUCCEEDED(hr) && panel) {
+        IInspectableABI* children = nullptr;
+        if (SUCCEEDED(panel->get_Children(&children)) && children) {
+            IVectorABI* vector = nullptr;
+            if (SUCCEEDED(children->QueryInterface(kIInspectable, reinterpret_cast<void**>(&vector)))) {
+                unsigned count = 0;
+                if (SUCCEEDED(vector->get_Size(&count)))
+                    Log(L"  children: %u", count);
+                vector->Release();
+            }
+            children->Release();
+        }
+        panel->Release();
+    }
+    content->Release();
+}
+
 static int Hook_OnGotFocus(void* self, void* args)
 {
-    Log(L"OnGotFocus fired: this=0x%p args=0x%p", self, args);
+    static bool inspected = false;
+    if (!inspected) {
+        inspected = true;
+        Log(L"OnGotFocus fired: this=0x%p args=0x%p", self, args);
+        InspectView(self);
+    }
     return g_onGotFocus(self, args);
 }
 
@@ -123,6 +277,8 @@ static DWORD WINAPI InitThread(LPVOID module)
     // ControlCenter.dll carries the Quick Settings XAML and is not statically
     // imported by the host, so it may or may not be mapped yet. Whichever it is
     // tells us which discovery path to take next.
+    ResolveHStringHelpers();
+
     HMODULE controlCenter = GetModuleHandleW(L"ControlCenter.dll");
     Log(L"ControlCenter.dll %s (0x%p)",
         controlCenter ? L"already mapped" : L"not mapped yet", controlCenter);
