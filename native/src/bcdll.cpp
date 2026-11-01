@@ -120,7 +120,9 @@ static GetStringRawBufferFn g_getStringRawBuffer = nullptr;
 static DeleteStringFn g_deleteString = nullptr;
 typedef HRESULT (WINAPI* RoGetActivationFactoryFn)(HSTRING, REFIID, void**);
 typedef HRESULT (WINAPI* WindowsCreateStringFn)(PCNZWCH, UINT32, HSTRING*);
+typedef HRESULT (WINAPI* RoActivateInstanceFn)(HSTRING, void**);
 static RoGetActivationFactoryFn g_roGetActivationFactory = nullptr;
+static RoActivateInstanceFn g_roActivateInstance = nullptr;
 static WindowsCreateStringFn g_createString = nullptr;
 
 
@@ -139,6 +141,8 @@ static void ResolveHStringHelpers()
         GetProcAddress(combase, "RoGetActivationFactory"));
     g_createString = reinterpret_cast<WindowsCreateStringFn>(
         GetProcAddress(combase, "WindowsCreateString"));
+    g_roActivateInstance = reinterpret_cast<RoActivateInstanceFn>(
+        GetProcAddress(combase, "RoActivateInstance"));
 }
 
 struct IInspectableABI : IUnknown
@@ -160,11 +164,18 @@ struct IPanelABI : IInspectableABI
     virtual HRESULT STDMETHODCALLTYPE get_Children(IInspectableABI** value) = 0;
 };
 
-// IVector<T>: GetAt, get_Size, GetView, IndexOf, ...
+// IVector<T>: GetAt, get_Size, GetView, IndexOf, SetAt, InsertAt, RemoveAt,
+// Append - Append is slot 13.
 struct IVectorABI : IInspectableABI
 {
     virtual HRESULT STDMETHODCALLTYPE GetAt(unsigned index, IInspectableABI** item) = 0;
     virtual HRESULT STDMETHODCALLTYPE get_Size(unsigned* size) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetView(IInspectableABI** view) = 0;
+    virtual HRESULT STDMETHODCALLTYPE IndexOf(IInspectableABI* item, unsigned* index, BOOL* found) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetAt(unsigned index, IInspectableABI* item) = 0;
+    virtual HRESULT STDMETHODCALLTYPE InsertAt(unsigned index, IInspectableABI* item) = 0;
+    virtual HRESULT STDMETHODCALLTYPE RemoveAt(unsigned index) = 0;
+    virtual HRESULT STDMETHODCALLTYPE Append(IInspectableABI* item) = 0;
 };
 
 static const IID kIContentControl = { 0xa26dd1dc, 0xcd44, 0x435c, { 0xbe, 0x94, 0x01, 0xd6, 0x24, 0x1c, 0x23, 0x1c } };
@@ -293,28 +304,34 @@ static void GetElementName(IDependencyObjectABI* node, wchar_t* out, size_t cch)
     if (FAILED(reinterpret_cast<IInspectableABI*>(node)->QueryInterface(
             kIFrameworkElement, reinterpret_cast<void**>(&element))) || !element)
         return;
-    element->Release();
-
-    void** vtable = *reinterpret_cast<void***>(node);
-    if (!vtable)
+    // Call through the IFrameworkElement pointer, not through `node`: `node`'s
+    // vtable is IDependencyObject's, which has only a handful of slots, so
+    // reading slot 33 off it lands in the middle of unrelated code.
+    void** vtable = *reinterpret_cast<void***>(element);
+    if (!vtable) {
+        element->Release();
         return;
+    }
     typedef HRESULT (STDMETHODCALLTYPE* GetNameFn)(void*, HSTRING*);
     auto getName = reinterpret_cast<GetNameFn>(vtable[33]);
-    if (!getName)
+    if (!getName) {
+        element->Release();
         return;
+    }
     HSTRING name = nullptr;
-    if (SUCCEEDED(getName(node, &name)) && name) {
+    if (SUCCEEDED(getName(element, &name)) && name) {
         UINT32 length = 0;
         const wchar_t* raw = g_getStringRawBuffer ? g_getStringRawBuffer(name, &length) : L"";
         wcsncpy_s(out, cch, raw, _TRUNCATE);
         if (g_deleteString)
             g_deleteString(name);
     }
+    element->Release();
 }
 
 static void WalkTree(IVisualTreeHelperStaticsABI* helper, IDependencyObjectABI* node, int depth)
 {
-    if (depth > 3)
+    if (depth > 9)
         return;
 
     UINT32 count = 0;
@@ -343,11 +360,69 @@ static void WalkTree(IVisualTreeHelperStaticsABI* helper, IDependencyObjectABI* 
     }
 }
 
+static IDependencyObjectABI* g_itemsPanel = nullptr;
+
+// Appends one real XAML element to the sliders list, to prove insertion works
+// before building the actual brightness row.
+static void InsertTestSlider()
+{
+    if (!g_itemsPanel) {
+        Log(L"insert: no ItemsStackPanel captured");
+        return;
+    }
+
+    IPanelABI* panel = nullptr;
+    HRESULT hr = reinterpret_cast<IInspectableABI*>(g_itemsPanel)->QueryInterface(
+        kIPanel, reinterpret_cast<void**>(&panel));
+    Log(L"insert: QI IPanel 0x%08X", hr);
+    if (FAILED(hr) || !panel)
+        return;
+
+    IInspectableABI* childrenRaw = nullptr;
+    hr = panel->get_Children(&childrenRaw);
+    Log(L"insert: get_Children 0x%08X", hr);
+    if (FAILED(hr) || !childrenRaw) {
+        panel->Release();
+        return;
+    }
+
+    // get_Children hands back IVector<UIElement> already, so cast it rather than
+    // QI for IInspectable - that would give a different vtable.
+    IVectorABI* children = reinterpret_cast<IVectorABI*>(childrenRaw);
+
+    unsigned before = 0;
+    children->get_Size(&before);
+
+    const wchar_t* className = L"Windows.UI.Xaml.Controls.Slider";
+    HSTRING name = nullptr;
+    g_createString(className, static_cast<UINT32>(wcslen(className)), &name);
+    void* instance = nullptr;
+    hr = g_roActivateInstance(name, &instance);
+    g_deleteString(name);
+    Log(L"insert: RoActivateInstance 0x%08X", hr);
+    if (FAILED(hr) || !instance) {
+        childrenRaw->Release();
+        panel->Release();
+        return;
+    }
+
+    hr = children->Append(reinterpret_cast<IInspectableABI*>(instance));
+    Log(L"insert: Append 0x%08X", hr);
+
+    unsigned after = 0;
+    children->get_Size(&after);
+    Log(L"insert: children %u -> %u", before, after);
+
+    reinterpret_cast<IInspectableABI*>(instance)->Release();
+    childrenRaw->Release();
+    panel->Release();
+}
+
 // Depth-first search for Slider elements, logging the chain that leads to them.
 static void SearchSliders(IVisualTreeHelperStaticsABI* helper, IDependencyObjectABI* node,
                           int depth, int* hits)
 {
-    if (depth > 14 || *hits > 24)
+    if (depth > 22 || *hits > 24)
         return;
 
     UINT32 count = 0;
@@ -366,8 +441,18 @@ static void SearchSliders(IVisualTreeHelperStaticsABI* helper, IDependencyObject
         wchar_t elementName[128] = {};
         GetElementName(child, elementName, 128);
 
-        if (wcscmp(elementName, L"SlidersGroup") == 0)
+        if (wcsstr(className, L"ItemsStackPanel") && !g_itemsPanel) {
+            child->AddRef();
+            g_itemsPanel = child;
+            Log(L"captured ItemsStackPanel: %.0fx%.0f", width, height);
+        }
+
+        if (wcscmp(elementName, L"SlidersGroup") == 0) {
             Log(L"FOUND SlidersGroup at depth %d: %s %.0fx%.0f", depth, className, width, height);
+            Log(L"--- SlidersGroup subtree ---");
+            WalkTree(helper, child, 0);
+            Log(L"--- end subtree ---");
+        }
 
         if (wcsstr(className, L"Slider") || wcsstr(className, L"Brightness")) {
             wchar_t parentName[128] = L"?";
@@ -433,6 +518,8 @@ static void InspectView(void* self)
     int hits = 0;
     SearchSliders(helper, node, 0, &hits);
     Log(L"slider hits: %d", hits);
+
+    InsertTestSlider();
 
     node->Release();
     root->Release();
@@ -500,6 +587,9 @@ struct IDispatcherQueueABI : IInspectableABI
 static const IID kIDispatcherQueueStatics = { 0xa96d83d7, 0x9371, 0x4517, { 0x92, 0x45, 0xd0, 0x82, 0x4a, 0xc1, 0x2c, 0x74 } };
 static const IID kIDispatcherQueue = { 0x603e88e4, 0xa338, 0x4ffe, { 0xa4, 0x57, 0xa5, 0xcf, 0xb9, 0xce, 0xb8, 0x99 } };
 static const IID kIDispatcherQueueHandler = { 0xdfa2dc9c, 0x1a2d, 0x4917, { 0x98, 0xf2, 0x93, 0x9a, 0xf1, 0xd6, 0xe0, 0xc8 } };
+// TryEnqueue refuses a handler that is not agile: 0x8000001C, "The object must
+// support the IAgileObject interface".
+static const IID kIAgileObject = { 0x94ea2b94, 0xe9cc, 0x49e0, { 0xc0, 0xff, 0xee, 0x64, 0xca, 0x8f, 0x5b, 0x90 } };
 
 static void* g_pendingView = nullptr;
 
@@ -519,7 +609,7 @@ struct QueueHandler : IUnknown
     {
         if (!ppv)
             return E_POINTER;
-        if (riid == kIDispatcherQueueHandler || riid == IID_IUnknown) {
+        if (riid == kIDispatcherQueueHandler || riid == IID_IUnknown || riid == kIAgileObject) {
             *ppv = this;
             AddRef();
             return S_OK;

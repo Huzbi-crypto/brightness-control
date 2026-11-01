@@ -190,3 +190,37 @@ Next things to try, in order:
 2. Same, but posted for the *next* dispatcher turn rather than inline.
 3. Check stack alignment across the relay: the hook is entered by `jmp`, not
    `call`, and the trampoline is then reached by `call` from the hook.
+
+## Where it stands
+
+The crash is fixed and the whole pipeline runs inside ShellHost:
+
+```
+hook entered: this=0x232FD9A5C18
+TryEnqueue: 0x00000000 queued=1
+FOUND SlidersGroup at depth 9: ContentControl 358x125
+captured ItemsStackPanel: 332x105
+insert: QI IPanel 0x00000000
+insert: get_Children 0x00000000
+insert: RoActivateInstance 0x00000000
+insert: Append 0x00000000
+insert: children 2 -> 3
+```
+
+The sliders area is:
+
+```
+SlidersGroup (ContentControl 358x125)
+  ContentPresenter -> GridView 332x114 -> Border -> ScrollViewer -> Grid
+    ScrollContentPresenter -> ItemsPresenter
+      ItemsStackPanel 332x105
+        GridViewItem 332x44   <- brightness
+        GridViewItem 332x44   <- volume
+```
+
+**Not done:** the appended element does not render. `Append` returns `S_OK` and
+the child count goes 2 -> 3, but the `GridView` re-templates its items on the
+next layout pass and drops a raw child from the virtualizing `ItemsStackPanel`.
+The row needs to be built as a real `GridViewItem` with an explicit size and
+inserted through the item source, or added as a sibling of the `GridView`
+inside a panel the shell does not virtualize.
