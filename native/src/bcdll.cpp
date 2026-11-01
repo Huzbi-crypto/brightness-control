@@ -266,6 +266,8 @@ struct IFrameworkElementABI : IInspectableABI
     virtual void* a3(); virtual void* a4(); virtual void* a5();      // slots 22..24
     virtual void* a6(); virtual void* a7(); virtual void* a8();      // slots 25..27
     virtual HRESULT STDMETHODCALLTYPE put_HorizontalAlignment(int value) = 0;  // slot 28
+    virtual void* a9();                                              // slot 29 get_VerticalAlignment
+    virtual HRESULT STDMETHODCALLTYPE put_VerticalAlignment(int value) = 0;  // slot 30
 };
 
 static const IID kIActivationFactory = { 0x00000035, 0, 0, { 0xC0, 0, 0, 0, 0, 0, 0, 0x46 } };
@@ -806,6 +808,17 @@ static IInspectableABI* MakeGlyph(const wchar_t* glyph, double size, BYTE alpha)
         }
         textBlock->Release();
     }
+
+    // A TextBlock in a horizontal StackPanel stretches to the row's full height
+    // and draws its text at the top, so a smaller glyph sat high next to a larger
+    // one. Centring each glyph makes them share a midline.
+    IFrameworkElementABI* element = nullptr;
+    if (SUCCEEDED(text->QueryInterface(kIFrameworkElement, reinterpret_cast<void**>(&element))) && element) {
+        HRESULT hrV = element->put_VerticalAlignment(1);  // Centre
+        if (FAILED(hrV))
+            Log(L"glyph: put_VerticalAlignment 0x%08X", hrV);
+        element->Release();
+    }
     return text;
 }
 
@@ -855,14 +868,15 @@ static void BuildChevron()
         IFrameworkElementABI* stackElement = nullptr;
         if (SUCCEEDED(text->QueryInterface(kIFrameworkElement, reinterpret_cast<void**>(&stackElement))) && stackElement) {
             stackElement->put_HorizontalAlignment(1);  // Centre
+            stackElement->put_VerticalAlignment(1);    // Centre
             stackElement->Release();
         }
 
-        if (IInspectableABI* brightness = MakeGlyph(L"\xE706", 17, 255)) {  // Brightness
+        if (IInspectableABI* brightness = MakeGlyph(L"\xE706", 16, 255)) {  // Brightness
             AppendChild(text, brightness);
             brightness->Release();
         }
-        if (IInspectableABI* chevron = MakeGlyph(L"\xE76C", 10, 200)) {  // ChevronRight
+        if (IInspectableABI* chevron = MakeGlyph(L"\xE76C", 12, 200)) {  // ChevronRight
             AppendChild(text, chevron);
             chevron->Release();
         }
