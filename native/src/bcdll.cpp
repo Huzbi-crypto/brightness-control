@@ -584,7 +584,8 @@ struct ITextBlockABI : IInspectableABI
 {
     virtual void* u0();
     virtual HRESULT STDMETHODCALLTYPE put_FontSize(double value) = 0;  // slot 7
-    virtual void* u2(); virtual void* u3();
+    virtual void* u2();
+    virtual HRESULT STDMETHODCALLTYPE put_FontFamily(IInspectableABI* value) = 0;  // slot 9
     virtual void* u4(); virtual void* u5(); virtual void* u6(); virtual void* u7();
     virtual void* u8(); virtual void* u9(); virtual void* u10(); virtual void* u11();
     virtual void* u12();
@@ -606,14 +607,55 @@ struct ISolidColorBrushABI : IInspectableABI
     virtual HRESULT STDMETHODCALLTYPE put_Color(ColorABI value) = 0;  // slot 7
 };
 
+// d5603377-3dae-4dcd-af09-f9498e9ec659 - CreateInstanceWithName is method 0.
+struct IFontFamilyFactoryABI : IInspectableABI
+{
+    virtual HRESULT STDMETHODCALLTYPE CreateInstanceWithName(HSTRING familyName,
+                                                             IInspectableABI* baseUri,
+                                                             IInspectableABI** result) = 0;
+};
+
+static const IID kIFontFamilyFactory = { 0xd5603377, 0x3dae, 0x4dcd, { 0xaf, 0x09, 0xf9, 0x49, 0x8e, 0x9e, 0xc6, 0x59 } };
+
+static IInspectableABI* MakeFontFamily(const wchar_t* family)
+{
+    HSTRING className = nullptr;
+    const wchar_t* cls = L"Windows.UI.Xaml.Media.FontFamily";
+    g_createString(cls, static_cast<UINT32>(wcslen(cls)), &className);
+    void* factory = nullptr;
+    HRESULT hr = g_roGetActivationFactory(className, kIActivationFactory, &factory);
+    g_deleteString(className);
+    if (FAILED(hr) || !factory) {
+        Log(L"fontfamily: factory 0x%08X", hr);
+        return nullptr;
+    }
+
+    IFontFamilyFactoryABI* fontFactory = nullptr;
+    hr = reinterpret_cast<IInspectableABI*>(factory)->QueryInterface(
+        kIFontFamilyFactory, reinterpret_cast<void**>(&fontFactory));
+    if (FAILED(hr) || !fontFactory) {
+        Log(L"fontfamily: QI 0x%08X", hr);
+        reinterpret_cast<IInspectableABI*>(factory)->Release();
+        return nullptr;
+    }
+
+    HSTRING name = nullptr;
+    g_createString(family, static_cast<UINT32>(wcslen(family)), &name);
+    IInspectableABI* result = nullptr;
+    hr = fontFactory->CreateInstanceWithName(name, nullptr, &result);
+    g_deleteString(name);
+    fontFactory->Release();
+    reinterpret_cast<IInspectableABI*>(factory)->Release();
+    Log(L"fontfamily: '%s' 0x%08X", family, hr);
+    return SUCCEEDED(hr) ? result : nullptr;
+}
+
 static const IID kISolidColorBrush = { 0x9d850850, 0x66f3, 0x48df, { 0x9a, 0x8f, 0x82, 0x4b, 0xd5, 0xe0, 0x70, 0xaf } };
 
 // fa002c1a-494e-46cf-91d4-e14a8d798674 - add_Click is method 8.
 struct IButtonBaseABI : IInspectableABI
 {
-    virtual void* u0();
-    virtual HRESULT STDMETHODCALLTYPE put_FontSize(double value) = 0;  // slot 7
-    virtual void* u2(); virtual void* u3();
+    virtual void* u0(); virtual void* u1(); virtual void* u2(); virtual void* u3();
     virtual void* u4(); virtual void* u5(); virtual void* u6(); virtual void* u7();
     virtual HRESULT STDMETHODCALLTYPE add_Click(void* handler, INT64* token) = 0;  // slot 14
 };
@@ -694,6 +736,17 @@ static void BuildChevron()
             HRESULT hrText = textBlock->put_Text(glyph);
             Log(L"chevron: put_Text 0x%08X", hrText);
             g_deleteString(glyph);
+
+            // Segoe Fluent Icons ships with Windows 11, so E76C draws a real
+            // chevron - but only once the TextBlock is told to use that family.
+            // Without it the codepoint falls back to a box.
+            textBlock->put_FontSize(16);
+            IInspectableABI* fontFamily = MakeFontFamily(L"Segoe Fluent Icons");
+            if (fontFamily) {
+                HRESULT hrFont = textBlock->put_FontFamily(fontFamily);
+                Log(L"chevron: put_FontFamily 0x%08X", hrFont);
+                fontFamily->Release();
+            }
 
             // A TextBlock defaults to black, which is invisible on the panel.
             IInspectableABI* brush = Activate(L"Windows.UI.Xaml.Media.SolidColorBrush");
