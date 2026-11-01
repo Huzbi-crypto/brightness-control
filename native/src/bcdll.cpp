@@ -474,6 +474,7 @@ static void AttachStockSlider()
 
     QueueExternalBrightness(value);
     BuildChevron();
+
 }
 
 static IVisualTreeHelperStaticsABI* GetVisualTreeHelper()
@@ -616,13 +617,18 @@ static IInspectableABI* Activate(const wchar_t* className)
 // ---------------------------------------------------------------------------
 
 // ae2d9271-3b4a-45fc-8468-f7949548f4d5 - put_Text is method 21.
+struct FontWeightABI { UINT16 Weight; };
+struct ThicknessABI { double Left, Top, Right, Bottom; };
+
 struct ITextBlockABI : IInspectableABI
 {
-    virtual void* u0();
+    virtual HRESULT STDMETHODCALLTYPE get_FontSize(double* value) = 0;  // slot 6
     virtual HRESULT STDMETHODCALLTYPE put_FontSize(double value) = 0;  // slot 7
     virtual void* u2();
     virtual HRESULT STDMETHODCALLTYPE put_FontFamily(IInspectableABI* value) = 0;  // slot 9
-    virtual void* u4(); virtual void* u5(); virtual void* u6(); virtual void* u7();
+    virtual void* u4();                                          // slot 10 get_FontWeight
+    virtual HRESULT STDMETHODCALLTYPE put_FontWeight(FontWeightABI value) = 0;  // slot 11
+    virtual void* u6(); virtual void* u7();
     virtual void* u8(); virtual void* u9(); virtual void* u10(); virtual void* u11();
     virtual void* u12();
     virtual HRESULT STDMETHODCALLTYPE put_Foreground(IInspectableABI* value) = 0;  // slot 19
@@ -692,7 +698,8 @@ static const IID kISolidColorBrush = { 0x9d850850, 0x66f3, 0x48df, { 0x9a, 0x8f,
 struct IButtonBaseABI : IInspectableABI
 {
     virtual void* u0(); virtual void* u1(); virtual void* u2(); virtual void* u3();
-    virtual void* u4(); virtual void* u5(); virtual void* u6(); virtual void* u7();
+    virtual void* u4(); virtual void* u5();
+    virtual void* u6(); virtual void* u7();
     virtual HRESULT STDMETHODCALLTYPE add_Click(void* handler, INT64* token) = 0;  // slot 14
 };
 
@@ -705,7 +712,9 @@ struct IControlABI : IInspectableABI
     virtual void* c12(); virtual void* c13(); virtual void* c14(); virtual void* c15();
     virtual void* c16(); virtual void* c17(); virtual void* c18(); virtual void* c19();
     virtual void* c20(); virtual void* c21(); virtual void* c22(); virtual void* c23();
-    virtual void* c24(); virtual void* c25(); virtual void* c26(); virtual void* c27();
+    virtual void* c24();                                          // slot 30 get_Padding
+    virtual HRESULT STDMETHODCALLTYPE put_Padding(ThicknessABI value) = 0;  // slot 31
+    virtual void* c26(); virtual void* c27();
     virtual void* c28(); virtual void* c29(); virtual void* c30();
     virtual HRESULT STDMETHODCALLTYPE put_Background(IInspectableABI* value) = 0;   // slot 37
     virtual void* c31(); virtual void* c32(); virtual void* c33();                  // slots 38-40
@@ -770,6 +779,12 @@ static IInspectableABI* MakeGlyph(const wchar_t* glyph, double size, BYTE alpha)
         textBlock->put_Text(value);
         g_deleteString(value);
         textBlock->put_FontSize(size);
+
+        // The shell's own glyphs read heavier than a regular weight at this size.
+        FontWeightABI weight = { 600 };  // SemiBold
+        HRESULT hrWeight = textBlock->put_FontWeight(weight);
+        if (FAILED(hrWeight))
+            Log(L"glyph: put_FontWeight 0x%08X", hrWeight);
 
         IInspectableABI* family = MakeFontFamily(L"Segoe Fluent Icons");
         if (family) {
@@ -843,11 +858,11 @@ static void BuildChevron()
             stackElement->Release();
         }
 
-        if (IInspectableABI* brightness = MakeGlyph(L"\xE706", 15, 255)) {  // Brightness
+        if (IInspectableABI* brightness = MakeGlyph(L"\xE706", 17, 255)) {  // Brightness
             AppendChild(text, brightness);
             brightness->Release();
         }
-        if (IInspectableABI* chevron = MakeGlyph(L"\xE76C", 9, 200)) {  // ChevronRight
+        if (IInspectableABI* chevron = MakeGlyph(L"\xE76C", 10, 200)) {  // ChevronRight
             AppendChild(text, chevron);
             chevron->Release();
         }
@@ -868,6 +883,11 @@ static void BuildChevron()
             if (SUCCEEDED(button->QueryInterface(kIControl, reinterpret_cast<void**>(&control))) && control) {
                 HRESULT hrBg = control->put_Background(clear);
                 Log(L"chevron: put_Background 0x%08X", hrBg);
+                // The default Button padding is what clipped the glyphs at the
+                // edges; zero it so the content gets the whole 40x40 box.
+                ThicknessABI noPadding = { 0, 0, 0, 0 };
+                HRESULT hrPad = control->put_Padding(noPadding);
+                Log(L"chevron: put_Padding 0x%08X", hrPad);
                 control->Release();
             }
             clear->Release();
@@ -891,9 +911,9 @@ static void BuildChevron()
 
     IFrameworkElementABI* element = nullptr;
     if (SUCCEEDED(button->QueryInterface(kIFrameworkElement, reinterpret_cast<void**>(&element))) && element) {
-        // Big enough that the glyph is not clipped by the button's padding.
+        // Match the shell's own volume button, which measures 40x40 in the tree.
         element->put_Width(40);
-        element->put_Height(32);
+        element->put_Height(40);
         element->put_HorizontalAlignment(2);  // Right
         element->Release();
     }
@@ -1598,6 +1618,7 @@ static void DoDeferredInspect()
     Log(L"deferred callback: view=0x%p", view);
     if (view)
         InspectView(view);
+
     Log(L"deferred callback: done");
 }
 
