@@ -242,6 +242,10 @@ struct IFrameworkElementABI : IInspectableABI
     virtual HRESULT STDMETHODCALLTYPE put_Width(double value) = 0;   // slot 16
     virtual void* unused8();                                        // slot 17 get_Height
     virtual HRESULT STDMETHODCALLTYPE put_Height(double value) = 0;  // slot 18
+    virtual void* a0(); virtual void* a1(); virtual void* a2();      // slots 19..21
+    virtual void* a3(); virtual void* a4(); virtual void* a5();      // slots 22..24
+    virtual void* a6(); virtual void* a7(); virtual void* a8();      // slots 25..27
+    virtual HRESULT STDMETHODCALLTYPE put_HorizontalAlignment(int value) = 0;  // slot 28
 };
 
 static const IID kIActivationFactory = { 0x00000035, 0, 0, { 0xC0, 0, 0, 0, 0, 0, 0, 0x46 } };
@@ -277,6 +281,7 @@ struct IGridStaticsABI : IInspectableABI
     virtual HRESULT STDMETHODCALLTYPE get_RowProperty(IDependencyObjectABI** value) = 0;
     virtual void* unused1();                                       // slot 7 GetRow
     virtual HRESULT STDMETHODCALLTYPE SetRow(IInspectableABI* element, int value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_ColumnProperty(IDependencyObjectABI** value) = 0;  // slot 9
 };
 
 // IDependencyObject::SetValue is slot 7.
@@ -406,6 +411,8 @@ struct ValueChangedHandler : IUnknown
 static ValueChangedHandler g_valueChangedHandler;
 static IDependencyObjectABI* g_stockSlider = nullptr;
 
+static void BuildChevron();
+
 static void AttachStockSlider()
 {
     if (!g_stockSlider) {
@@ -430,6 +437,7 @@ static void AttachStockSlider()
     range->Release();
 
     QueueExternalBrightness(value);
+    BuildChevron();
 }
 
 static IVisualTreeHelperStaticsABI* GetVisualTreeHelper()
@@ -565,6 +573,258 @@ static IInspectableABI* Activate(const wchar_t* className)
         return nullptr;
     }
     return reinterpret_cast<IInspectableABI*>(instance);
+}
+
+// ---------------------------------------------------------------------------
+// The chevron button on the brightness row
+// ---------------------------------------------------------------------------
+
+// ae2d9271-3b4a-45fc-8468-f7949548f4d5 - put_Text is method 21.
+struct ITextBlockABI : IInspectableABI
+{
+    virtual void* u0();
+    virtual HRESULT STDMETHODCALLTYPE put_FontSize(double value) = 0;  // slot 7
+    virtual void* u2(); virtual void* u3();
+    virtual void* u4(); virtual void* u5(); virtual void* u6(); virtual void* u7();
+    virtual void* u8(); virtual void* u9(); virtual void* u10(); virtual void* u11();
+    virtual void* u12();
+    virtual HRESULT STDMETHODCALLTYPE put_Foreground(IInspectableABI* value) = 0;  // slot 19
+    virtual void* u14(); virtual void* u15(); virtual void* u16(); virtual void* u17();
+    virtual void* u18(); virtual void* u19(); virtual void* u20();
+    virtual HRESULT STDMETHODCALLTYPE put_Text(HSTRING value) = 0;  // slot 27
+};
+
+// 9d850850-66f3-48df-9a8f-824bd5e070af - put_Color is method 1.
+struct ColorABI
+{
+    BYTE a, r, g, b;
+};
+
+struct ISolidColorBrushABI : IInspectableABI
+{
+    virtual void* unusedGetColor();                                 // slot 6
+    virtual HRESULT STDMETHODCALLTYPE put_Color(ColorABI value) = 0;  // slot 7
+};
+
+static const IID kISolidColorBrush = { 0x9d850850, 0x66f3, 0x48df, { 0x9a, 0x8f, 0x82, 0x4b, 0xd5, 0xe0, 0x70, 0xaf } };
+
+// fa002c1a-494e-46cf-91d4-e14a8d798674 - add_Click is method 8.
+struct IButtonBaseABI : IInspectableABI
+{
+    virtual void* u0();
+    virtual HRESULT STDMETHODCALLTYPE put_FontSize(double value) = 0;  // slot 7
+    virtual void* u2(); virtual void* u3();
+    virtual void* u4(); virtual void* u5(); virtual void* u6(); virtual void* u7();
+    virtual HRESULT STDMETHODCALLTYPE add_Click(void* handler, INT64* token) = 0;  // slot 14
+};
+
+static const IID kITextBlock = { 0xae2d9271, 0x3b4a, 0x45fc, { 0x84, 0x68, 0xf7, 0x94, 0x95, 0x48, 0xf4, 0xd5 } };
+static const IID kIButtonBase = { 0xfa002c1a, 0x494e, 0x46cf, { 0x91, 0xd4, 0xe1, 0x4a, 0x8d, 0x79, 0x86, 0x74 } };
+static const IID kIRoutedEventHandler = { 0x68e0e810, 0xf6ea, 0x42bc, { 0x85, 0x5b, 0x5d, 0x9b, 0x67, 0xe6, 0xa2, 0x62 } };
+
+static void ShowMonitorPanel();  // built later
+
+struct ClickHandler : IUnknown
+{
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override
+    {
+        if (!ppv)
+            return E_POINTER;
+        if (riid == kIRoutedEventHandler || riid == IID_IUnknown || riid == kIAgileObject) {
+            *ppv = this;
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return 2; }
+    ULONG STDMETHODCALLTYPE Release() override { return 1; }
+
+    virtual HRESULT STDMETHODCALLTYPE Invoke(IInspectableABI*, void*)
+    {
+        Log(L"chevron: clicked");
+        ShowMonitorPanel();
+        return S_OK;
+    }
+};
+
+static ClickHandler g_clickHandler;
+
+static void BuildChevron()
+{
+    if (!g_stockSlider) {
+        Log(L"chevron: no stock slider");
+        return;
+    }
+
+    IVisualTreeHelperStaticsABI* helper = GetVisualTreeHelper();
+    if (!helper)
+        return;
+
+    IDependencyObjectABI* sliderObject = nullptr;
+    if (FAILED(reinterpret_cast<IInspectableABI*>(g_stockSlider)->QueryInterface(
+            kIDependencyObject, reinterpret_cast<void**>(&sliderObject))) || !sliderObject) {
+        helper->Release();
+        return;
+    }
+
+    // The row is the Grid that holds the icon and the slider.
+    IDependencyObjectABI* row = nullptr;
+    HRESULT hr = helper->GetParent(sliderObject, &row);
+    Log(L"chevron: GetParent(row) 0x%08X", hr);
+    sliderObject->Release();
+    helper->Release();
+    if (FAILED(hr) || !row)
+        return;
+
+    wchar_t rowName[128] = L"?";
+    double rowW = -1, rowH = -1;
+    DescribeNode(row, rowName, 128, &rowW, &rowH);
+    Log(L"chevron: row is %s %.0fx%.0f", rowName, rowW, rowH);
+
+    // A glyph, because an empty Button has no visual content.
+    IInspectableABI* text = Activate(L"Windows.UI.Xaml.Controls.TextBlock");
+    if (text) {
+        ITextBlockABI* textBlock = nullptr;
+        if (SUCCEEDED(text->QueryInterface(kITextBlock, reinterpret_cast<void**>(&textBlock))) && textBlock) {
+            HSTRING glyph = nullptr;
+            const wchar_t* chevron = L"\xE76C";  // Segoe Fluent: ChevronRight
+            g_createString(chevron, 1, &glyph);
+            HRESULT hrText = textBlock->put_Text(glyph);
+            Log(L"chevron: put_Text 0x%08X", hrText);
+            g_deleteString(glyph);
+
+            // A TextBlock defaults to black, which is invisible on the panel.
+            IInspectableABI* brush = Activate(L"Windows.UI.Xaml.Media.SolidColorBrush");
+            if (brush) {
+                ISolidColorBrushABI* solid = nullptr;
+                if (SUCCEEDED(brush->QueryInterface(kISolidColorBrush, reinterpret_cast<void**>(&solid))) && solid) {
+                    ColorABI white = { 255, 255, 255, 255 };
+                    HRESULT hrColor = solid->put_Color(white);
+                    HRESULT hrFg = textBlock->put_Foreground(brush);
+                    Log(L"chevron: put_Color 0x%08X put_Foreground 0x%08X", hrColor, hrFg);
+                    solid->Release();
+                }
+                brush->Release();
+            }
+            textBlock->Release();
+        }
+    }
+
+    IInspectableABI* button = Activate(L"Windows.UI.Xaml.Controls.Button");
+    if (!button) {
+        if (text) text->Release();
+        row->Release();
+        return;
+    }
+
+    if (text) {
+        IContentControlABI* content = nullptr;
+        if (SUCCEEDED(button->QueryInterface(kIContentControl, reinterpret_cast<void**>(&content))) && content) {
+            hr = content->put_Content(text);
+            Log(L"chevron: put_Content(glyph) 0x%08X", hr);
+            content->Release();
+        }
+        text->Release();
+    }
+
+    IFrameworkElementABI* element = nullptr;
+    if (SUCCEEDED(button->QueryInterface(kIFrameworkElement, reinterpret_cast<void**>(&element))) && element) {
+        element->put_Width(36);
+        element->put_Height(32);
+        element->put_HorizontalAlignment(2);  // Right
+        element->Release();
+    }
+
+    IPanelABI* rowPanel = nullptr;
+    if (SUCCEEDED(row->QueryInterface(kIPanel, reinterpret_cast<void**>(&rowPanel))) && rowPanel) {
+        IInspectableABI* children = nullptr;
+        if (SUCCEEDED(rowPanel->get_Children(&children)) && children) {
+            IVectorABI* vector = reinterpret_cast<IVectorABI*>(children);
+            unsigned before = 0, after = 0;
+            vector->get_Size(&before);
+            hr = vector->Append(button);
+            Log(L"chevron: append button 0x%08X", hr);
+            vector->get_Size(&after);
+            Log(L"chevron: row children %u -> %u", before, after);
+            children->Release();
+        }
+        rowPanel->Release();
+    }
+
+    // The row is a Grid of icon | slider, so a child appended without a column
+    // lands in column 0 and is clipped behind the icon.
+    IGridABI* rowGrid = nullptr;
+    unsigned columnCount = 0;
+    if (SUCCEEDED(row->QueryInterface(kIGrid, reinterpret_cast<void**>(&rowGrid))) && rowGrid) {
+        IInspectableABI* columnsRaw = nullptr;
+        if (SUCCEEDED(rowGrid->get_ColumnDefinitions(&columnsRaw)) && columnsRaw) {
+            unsigned size = 0;
+            reinterpret_cast<IVectorABI*>(columnsRaw)->get_Size(&size);
+            columnCount = size;
+            columnsRaw->Release();
+        }
+        rowGrid->Release();
+    }
+    Log(L"chevron: row has %u column(s)", columnCount);
+
+    if (columnCount > 0) {
+        // Same route as Grid.Row: the static setter faults, the property works.
+        HSTRING gridName = nullptr;
+        const wchar_t* gridClass = L"Windows.UI.Xaml.Controls.Grid";
+        g_createString(gridClass, static_cast<UINT32>(wcslen(gridClass)), &gridName);
+        void* gridFactory = nullptr;
+        if (SUCCEEDED(g_roGetActivationFactory(gridName, kIActivationFactory, &gridFactory)) && gridFactory) {
+            IGridStaticsABI* statics = nullptr;
+            if (SUCCEEDED(reinterpret_cast<IInspectableABI*>(gridFactory)->QueryInterface(
+                    kIGridStatics, reinterpret_cast<void**>(&statics))) && statics) {
+                IDependencyObjectABI* columnProperty = nullptr;
+                if (SUCCEEDED(statics->get_ColumnProperty(&columnProperty)) && columnProperty) {
+                    IInspectableABI* buttonObject = nullptr;
+                    if (SUCCEEDED(button->QueryInterface(kIDependencyObject, reinterpret_cast<void**>(&buttonObject))) && buttonObject) {
+                        HSTRING pvName = nullptr;
+                        const wchar_t* pvClass = L"Windows.Foundation.PropertyValue";
+                        g_createString(pvClass, static_cast<UINT32>(wcslen(pvClass)), &pvName);
+                        void* pvFactory = nullptr;
+                        if (SUCCEEDED(g_roGetActivationFactory(pvName, kIActivationFactory, &pvFactory)) && pvFactory) {
+                            IPropertyValueStaticsABI* pv = nullptr;
+                            if (SUCCEEDED(reinterpret_cast<IInspectableABI*>(pvFactory)->QueryInterface(
+                                    kIPropertyValueStatics, reinterpret_cast<void**>(&pv))) && pv) {
+                                IInspectableABI* boxed = nullptr;
+                                int column = static_cast<int>(columnCount - 1);
+                                if (SUCCEEDED(pv->CreateInt32(column, &boxed)) && boxed) {
+                                    HRESULT hrColumn = reinterpret_cast<IDependencyObjectSetValueABI*>(buttonObject)
+                                                           ->SetValue(columnProperty, boxed);
+                                    Log(L"chevron: SetValue(Grid.Column, %d) 0x%08X", column, hrColumn);
+                                    boxed->Release();
+                                }
+                                pv->Release();
+                            }
+                            reinterpret_cast<IInspectableABI*>(pvFactory)->Release();
+                        }
+                        g_deleteString(pvName);
+                        columnProperty->Release();
+                        buttonObject->Release();
+                    }
+                }
+                statics->Release();
+            }
+            reinterpret_cast<IInspectableABI*>(gridFactory)->Release();
+        }
+        g_deleteString(gridName);
+    }
+
+    IButtonBaseABI* buttonBase = nullptr;
+    if (SUCCEEDED(button->QueryInterface(kIButtonBase, reinterpret_cast<void**>(&buttonBase))) && buttonBase) {
+        INT64 token = 0;
+        hr = buttonBase->add_Click(&g_clickHandler, &token);
+        Log(L"chevron: add_Click 0x%08X", hr);
+        buttonBase->Release();
+    }
+
+    button->Release();
+    row->Release();
 }
 
 // Adds a row to L1Grid and puts the panel in it, which is how the shell lays out
@@ -1050,6 +1310,11 @@ static void QueueDeferredInspect(void* view)
     hr = queue->TryEnqueue(&g_handler, &queued);
     Log(L"TryEnqueue: 0x%08X queued=%d", hr, queued);
     queue->Release();
+}
+
+static void ShowMonitorPanel()
+{
+    Log(L"panel: not built yet");
 }
 
 static int Hook_OnGotFocus(void* self, void* args)
