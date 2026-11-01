@@ -49,7 +49,8 @@ static BOOL CALLBACK FindMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM)
     fwprintf(stderr, L"monitor: %lu physical monitor(s)\n", count);
 
     PHYSICAL_MONITOR stack[8] = {};
-    PHYSICAL_MONITOR* monitors = (count <= 8) ? stack : static_cast<PHYSICAL_MONITOR*>(
+    const bool onStack = (count <= 8);
+    PHYSICAL_MONITOR* monitors = onStack ? stack : static_cast<PHYSICAL_MONITOR*>(
         HeapAlloc(GetProcessHeap(), 0, count * sizeof(PHYSICAL_MONITOR)));
     if (!monitors)
         return TRUE;
@@ -75,22 +76,43 @@ static BOOL CALLBACK FindMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM)
         for (DWORD i = 0; i < count; ++i) {
             if (g_haveMonitor && monitors[i].hPhysicalMonitor == g_monitor.hPhysicalMonitor)
                 continue;
-            DestroyPhysicalMonitor(monitors[i].hPhysicalMonitor);
+            if (monitors[i].hPhysicalMonitor)
+                DestroyPhysicalMonitor(monitors[i].hPhysicalMonitor);
         }
     } else {
         fwprintf(stderr, L"GetPhysicalMonitorsFromHMONITOR failed %lu\n", GetLastError());
     }
 
-    HeapFree(GetProcessHeap(), 0, monitors);
+    // Only free what came from the heap: freeing the stack array corrupts the
+    // heap and kills the process part way through the monitor list, which is
+    // what hid the DDC-capable display from this helper.
+    if (!onStack)
+        HeapFree(GetProcessHeap(), 0, monitors);
     return g_haveMonitor ? FALSE : TRUE;
 }
 
+// Handle creation is unreliable here: the same call returns a real handle on one
+// run and 0 on the next, and the VCP read comes back with
+// ERROR_GRAPHICS_I2C_ERROR_RECEIVING_DATA (0xC02625E2) when the bus is busy.
+// Both clear up on a retry, so give each a few goes before giving up.
 static bool EnsureMonitor()
 {
     if (g_haveMonitor)
         return true;
-    EnumDisplayMonitors(nullptr, nullptr, FindMonitor, 0);
-    return g_haveMonitor;
+
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        EnumDisplayMonitors(nullptr, nullptr, FindMonitor, 0);
+        if (g_haveMonitor) {
+            DWORD current = 0, maximum = 0;
+            if (GetVCPFeatureAndVCPFeatureReply(g_monitor.hPhysicalMonitor, 0x10,
+                                                nullptr, &current, &maximum))
+                return true;
+            DestroyPhysicalMonitor(g_monitor.hPhysicalMonitor);
+            g_haveMonitor = false;
+        }
+        Sleep(120);
+    }
+    return false;
 }
 
 static bool WriteBrightness(int value)
@@ -130,7 +152,10 @@ int wmain(int argc, wchar_t** argv)
     SetProcessDPIAware();
     DWORD session = 0;
     ProcessIdToSessionId(GetCurrentProcessId(), &session);
-    fwprintf(stderr, L"session=%lu pid=%lu\n", session, GetCurrentProcessId());
+    fwprintf(stderr, L"session=%lu pid=%lu sizeof=%zu desc_off=%zu\n",
+             session, GetCurrentProcessId(),
+             sizeof(PHYSICAL_MONITOR),
+             offsetof(PHYSICAL_MONITOR, szPhysicalMonitorDescription));
 
     if (argc >= 3 && wcscmp(argv[1], L"--set") == 0) {
         int value = _wtoi(argv[2]);
