@@ -2223,6 +2223,16 @@ static IInspectableABI* BuildBrightnessSubPage()
                 titleElement->put_VerticalAlignment(1);  // Centre
                 titleElement->Release();
             }
+            // Heading, not body text. The shell's "Sound output" measures 14px of
+            // ink against 12px rows; 14px semibold lands on that without
+            // overpowering the rows.
+            ITextBlockABI* titleText = nullptr;
+            if (SUCCEEDED(title->QueryInterface(kITextBlock, reinterpret_cast<void**>(&titleText))) && titleText) {
+                titleText->put_FontSize(14);
+                FontWeightABI headingWeight = { 600 };  // SemiBold
+                titleText->put_FontWeight(headingWeight);
+                titleText->Release();
+            }
             AppendChild(header, title);
             title->Release();
         }
