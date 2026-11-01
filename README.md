@@ -1,5 +1,9 @@
 # brightness-control
 
+> **Archived branch.** This is the original C# tray-app implementation, kept for
+> reference. It was replaced by a native implementation that puts the controls
+> inside Windows Quick Settings itself - see `master`.
+
 A small Windows tray app that drives an external monitor's brightness over DDC/CI, keeps it in step with the laptop panel, and shows a slider per display in one panel.
 
 ## The problem
