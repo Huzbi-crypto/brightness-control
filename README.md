@@ -67,8 +67,10 @@ there is something to write.
 
 ## Install
 
-Download the latest release, extract the zip, and run **`install.cmd`**. That is
-the whole process — no administrator rights, no build tools, no command line.
+**[Download the latest release →](https://github.com/Huzbi-crypto/brightness-control/releases/latest)**
+
+Extract the zip and run **`install.cmd`**. That is the whole process — no
+administrator rights, no build tools, no command line.
 
 The installer copies the files into `%LOCALAPPDATA%\BrightnessControl`, registers
 a hidden logon launcher, starts the agent, and then waits until it has actually
