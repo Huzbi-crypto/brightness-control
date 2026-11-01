@@ -118,6 +118,11 @@ typedef PCWSTR (WINAPI* GetStringRawBufferFn)(HSTRING, UINT32*);
 typedef HRESULT (WINAPI* DeleteStringFn)(HSTRING);
 static GetStringRawBufferFn g_getStringRawBuffer = nullptr;
 static DeleteStringFn g_deleteString = nullptr;
+typedef HRESULT (WINAPI* RoGetActivationFactoryFn)(HSTRING, REFIID, void**);
+typedef HRESULT (WINAPI* WindowsCreateStringFn)(PCNZWCH, UINT32, HSTRING*);
+static RoGetActivationFactoryFn g_roGetActivationFactory = nullptr;
+static WindowsCreateStringFn g_createString = nullptr;
+
 
 static void ResolveHStringHelpers()
 {
@@ -130,6 +135,10 @@ static void ResolveHStringHelpers()
         GetProcAddress(combase, "WindowsGetStringRawBuffer"));
     g_deleteString = reinterpret_cast<DeleteStringFn>(
         GetProcAddress(combase, "WindowsDeleteString"));
+    g_roGetActivationFactory = reinterpret_cast<RoGetActivationFactoryFn>(
+        GetProcAddress(combase, "RoGetActivationFactory"));
+    g_createString = reinterpret_cast<WindowsCreateStringFn>(
+        GetProcAddress(combase, "WindowsCreateString"));
 }
 
 struct IInspectableABI : IUnknown
@@ -180,89 +189,311 @@ static void LogClassName(const wchar_t* label, IInspectableABI* object)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Visual tree walk
+// ---------------------------------------------------------------------------
+
+// e75758c4-d25d-4b1d-971f-596f17f12baa — the four Find* methods come first, so
+// GetChild/GetChildrenCount sit at slots 10 and 11.
+struct IDependencyObjectABI : IInspectableABI
+{
+};
+
+struct IVisualTreeHelperStaticsABI : IInspectableABI
+{
+    virtual void* unused0();
+    virtual void* unused1();
+    virtual void* unused2();
+    virtual void* unused3();
+    virtual HRESULT STDMETHODCALLTYPE GetChild(IDependencyObjectABI* reference, INT32 childIndex,
+                                                IDependencyObjectABI** result) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetChildrenCount(IDependencyObjectABI* reference, UINT32* result) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetParent(IDependencyObjectABI* reference,
+                                                 IDependencyObjectABI** result) = 0;
+};
+
+// a391d09b-4a99-4b7c-9d8d-6fa5d01f6fbf — ActualWidth/ActualHeight are methods
+// 7 and 8, i.e. vtable slots 13 and 14.
+struct IFrameworkElementABI : IInspectableABI
+{
+    virtual void* unused0();
+    virtual void* unused1();
+    virtual void* unused2();
+    virtual void* unused3();
+    virtual void* unused4();
+    virtual void* unused5();
+    virtual void* unused6();
+    virtual HRESULT STDMETHODCALLTYPE get_ActualWidth(double* value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_ActualHeight(double* value) = 0;
+};
+
+static const IID kIActivationFactory = { 0x00000035, 0, 0, { 0xC0, 0, 0, 0, 0, 0, 0, 0x46 } };
+static const IID kIVisualTreeHelperStatics = { 0xe75758c4, 0xd25d, 0x4b1d, { 0x97, 0x1f, 0x59, 0x6f, 0x17, 0xf1, 0x2b, 0xaa } };
+static const IID kIFrameworkElement = { 0xa391d09b, 0x4a99, 0x4b7c, { 0x9d, 0x8d, 0x6f, 0xa5, 0xd0, 0x1f, 0x6f, 0xbf } };
+static const IID kIDependencyObject = { 0x5c526665, 0xf60e, 0x4912, { 0xaf, 0x59, 0x5f, 0xe0, 0x68, 0x0f, 0x08, 0x9d } };
+
+
+static IVisualTreeHelperStaticsABI* GetVisualTreeHelper()
+{
+    if (!g_roGetActivationFactory || !g_createString)
+        return nullptr;
+
+    // Length has to be exact: a hand-counted 39 for a 38-char name makes
+    // RoGetActivationFactory return E_INVALIDARG.
+    const wchar_t* className = L"Windows.UI.Xaml.Media.VisualTreeHelper";
+    HSTRING name = nullptr;
+    if (FAILED(g_createString(className, static_cast<UINT32>(wcslen(className)), &name)) || !name)
+        return nullptr;
+
+    void* factory = nullptr;
+    HRESULT hr = g_roGetActivationFactory(name, kIActivationFactory, &factory);
+    g_deleteString(name);
+    Log(L"RoGetActivationFactory(VisualTreeHelper): 0x%08X", hr);
+    if (FAILED(hr) || !factory)
+        return nullptr;
+
+    IVisualTreeHelperStaticsABI* statics = nullptr;
+    hr = reinterpret_cast<IInspectableABI*>(factory)->QueryInterface(
+        kIVisualTreeHelperStatics, reinterpret_cast<void**>(&statics));
+    reinterpret_cast<IInspectableABI*>(factory)->Release();
+    Log(L"QI IVisualTreeHelperStatics: 0x%08X", hr);
+    return SUCCEEDED(hr) ? statics : nullptr;
+}
+
+static void DescribeNode(IDependencyObjectABI* node, wchar_t* className, size_t cch,
+                         double* width, double* height)
+{
+    auto inspectable = reinterpret_cast<IInspectableABI*>(node);
+
+    HSTRING hname = nullptr;
+    if (SUCCEEDED(inspectable->GetRuntimeClassName(&hname)) && hname) {
+        UINT32 length = 0;
+        const wchar_t* raw = g_getStringRawBuffer ? g_getStringRawBuffer(hname, &length) : L"?";
+        wcsncpy_s(className, cch, raw, _TRUNCATE);
+        if (g_deleteString)
+            g_deleteString(hname);
+    }
+
+    IFrameworkElementABI* element = nullptr;
+    if (SUCCEEDED(inspectable->QueryInterface(kIFrameworkElement, reinterpret_cast<void**>(&element))) && element) {
+        element->get_ActualWidth(width);
+        element->get_ActualHeight(height);
+        element->Release();
+    }
+}
+
+static void GetElementName(IDependencyObjectABI* node, wchar_t* out, size_t cch)
+{
+    out[0] = 0;
+
+    // get_Name lives at slot 33, past the end of IDependencyObject. Calling it
+    // on an object that is not a FrameworkElement is a wild call that takes the
+    // shell down, so confirm the interface first.
+    IFrameworkElementABI* element = nullptr;
+    if (FAILED(reinterpret_cast<IInspectableABI*>(node)->QueryInterface(
+            kIFrameworkElement, reinterpret_cast<void**>(&element))) || !element)
+        return;
+    element->Release();
+
+    void** vtable = *reinterpret_cast<void***>(node);
+    if (!vtable)
+        return;
+    typedef HRESULT (STDMETHODCALLTYPE* GetNameFn)(void*, HSTRING*);
+    auto getName = reinterpret_cast<GetNameFn>(vtable[33]);
+    if (!getName)
+        return;
+    HSTRING name = nullptr;
+    if (SUCCEEDED(getName(node, &name)) && name) {
+        UINT32 length = 0;
+        const wchar_t* raw = g_getStringRawBuffer ? g_getStringRawBuffer(name, &length) : L"";
+        wcsncpy_s(out, cch, raw, _TRUNCATE);
+        if (g_deleteString)
+            g_deleteString(name);
+    }
+}
+
+static void WalkTree(IVisualTreeHelperStaticsABI* helper, IDependencyObjectABI* node, int depth)
+{
+    if (depth > 3)
+        return;
+
+    UINT32 count = 0;
+    if (FAILED(helper->GetChildrenCount(node, &count)))
+        return;
+
+    for (UINT32 i = 0; i < count && i < 8; ++i) {
+        IDependencyObjectABI* child = nullptr;
+        if (FAILED(helper->GetChild(node, static_cast<INT32>(i), &child)) || !child)
+            continue;
+
+        wchar_t className[128] = L"?";
+        double width = -1, height = -1;
+        DescribeNode(child, className, 128, &width, &height);
+
+        UINT32 grandchildren = 0;
+        helper->GetChildrenCount(child, &grandchildren);
+
+        wchar_t indent[32] = {};
+        for (int k = 0; k < depth * 2 + 2 && k < 30; ++k)
+            indent[k] = L' ';
+        Log(L"%s[%u] %s  %.0fx%.0f  children=%u", indent, i, className, width, height, grandchildren);
+
+        WalkTree(helper, child, depth + 1);
+        child->Release();
+    }
+}
+
+// Depth-first search for Slider elements, logging the chain that leads to them.
+static void SearchSliders(IVisualTreeHelperStaticsABI* helper, IDependencyObjectABI* node,
+                          int depth, int* hits)
+{
+    if (depth > 14 || *hits > 24)
+        return;
+
+    UINT32 count = 0;
+    if (FAILED(helper->GetChildrenCount(node, &count)))
+        return;
+
+    for (UINT32 i = 0; i < count && *hits <= 24; ++i) {
+        IDependencyObjectABI* child = nullptr;
+        if (FAILED(helper->GetChild(node, static_cast<INT32>(i), &child)) || !child)
+            continue;
+
+        wchar_t className[128] = L"?";
+        double width = -1, height = -1;
+        DescribeNode(child, className, 128, &width, &height);
+
+        wchar_t elementName[128] = {};
+        GetElementName(child, elementName, 128);
+
+        if (wcscmp(elementName, L"SlidersGroup") == 0)
+            Log(L"FOUND SlidersGroup at depth %d: %s %.0fx%.0f", depth, className, width, height);
+
+        if (wcsstr(className, L"Slider") || wcsstr(className, L"Brightness")) {
+            wchar_t parentName[128] = L"?";
+            double pw = -1, ph = -1;
+            IDependencyObjectABI* parent = nullptr;
+            UINT32 parentKids = 0;
+            if (SUCCEEDED(helper->GetParent(child, &parent)) && parent) {
+                DescribeNode(parent, parentName, 128, &pw, &ph);
+                helper->GetChildrenCount(parent, &parentKids);
+                parent->Release();
+            }
+            Log(L"HIT depth=%d %s name='%s' %.0fx%.0f  parent=%s %.0fx%.0f children=%u",
+                depth, className, elementName, width, height, parentName, pw, ph, parentKids);
+            (*hits)++;
+        }
+
+        SearchSliders(helper, child, depth + 1, hits);
+        child->Release();
+    }
+}
+
 static void InspectView(void* self)
 {
     auto inspectable = reinterpret_cast<IInspectableABI*>(self);
 
     LogClassName(L"view class", inspectable);
 
-    // Dump the interface list: the view is not a ContentControl, so the way to
-    // its children has to come from what it actually implements.
-    ULONG iidCount = 0;
-    IID* iids = nullptr;
-    if (SUCCEEDED(inspectable->GetIids(&iidCount, &iids)) && iids) {
-        for (ULONG i = 0; i < iidCount; ++i) {
-            const IID& id = iids[i];
-            Log(L"  iid {%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
-                id.Data1, id.Data2, id.Data3,
-                id.Data4[0], id.Data4[1], id.Data4[2], id.Data4[3],
-                id.Data4[4], id.Data4[5], id.Data4[6], id.Data4[7]);
-        }
-        CoTaskMemFree(iids);
+    IVisualTreeHelperStaticsABI* helper = GetVisualTreeHelper();
+    if (!helper) {
+        Log(L"VisualTreeHelper unavailable");
+        return;
     }
 
-    IPanelABI* selfPanel = nullptr;
-    HRESULT selfHr = inspectable->QueryInterface(kIPanel, reinterpret_cast<void**>(&selfPanel));
-    Log(L"QI IPanel on view: 0x%08X", selfHr);
-    if (SUCCEEDED(selfHr) && selfPanel) {
-        IInspectableABI* children = nullptr;
-        if (SUCCEEDED(selfPanel->get_Children(&children)) && children) {
-            IVectorABI* vector = nullptr;
-            if (SUCCEEDED(children->QueryInterface(kIInspectable, reinterpret_cast<void**>(&vector)))) {
-                unsigned count = 0;
-                if (SUCCEEDED(vector->get_Size(&count)))
-                    Log(L"  view children: %u", count);
-                vector->Release();
-            }
-            children->Release();
-        }
-        selfPanel->Release();
+    IDependencyObjectABI* root = nullptr;
+    if (FAILED(inspectable->QueryInterface(kIDependencyObject, reinterpret_cast<void**>(&root))) || !root) {
+        Log(L"view is not a DependencyObject");
+        helper->Release();
+        return;
     }
 
-    IContentControlABI* contentControl = nullptr;
-    HRESULT hr = inspectable->QueryInterface(kIContentControl, reinterpret_cast<void**>(&contentControl));
-    Log(L"QI IContentControl: 0x%08X", hr);
-    if (FAILED(hr) || !contentControl)
+    WalkTree(helper, root, 0);
+
+    // The view is one card; the sliders are in a sibling, so climb first.
+    IDependencyObjectABI* node = root;
+    node->AddRef();
+    for (int up = 0; up < 8; ++up) {
+        IDependencyObjectABI* parent = nullptr;
+        if (FAILED(helper->GetParent(node, &parent)) || !parent) {
+            Log(L"  up %d: <no parent>", up + 1);
+            break;
+        }
+        wchar_t name[128] = L"?";
+        double w = -1, h = -1;
+        DescribeNode(parent, name, 128, &w, &h);
+        UINT32 kids = 0;
+        helper->GetChildrenCount(parent, &kids);
+        Log(L"  up %d: %s  %.0fx%.0f  children=%u", up + 1, name, w, h, kids);
+        node->Release();
+        node = parent;
+    }
+
+    Log(L"searching for Slider below the top ancestor");
+    int hits = 0;
+    SearchSliders(helper, node, 0, &hits);
+    Log(L"slider hits: %d", hits);
+
+    node->Release();
+    root->Release();
+    helper->Release();
+}
+
+static void WalkLight(IVisualTreeHelperStaticsABI* helper, IDependencyObjectABI* node, int depth)
+{
+    if (depth > 12)
         return;
 
-    IInspectableABI* content = nullptr;
-    hr = contentControl->get_Content(&content);
-    Log(L"get_Content: 0x%08X", hr);
-    contentControl->Release();
-
-    if (FAILED(hr) || !content)
+    UINT32 count = 0;
+    if (FAILED(helper->GetChildrenCount(node, &count)))
         return;
 
-    LogClassName(L"  content class", content);
+    for (UINT32 i = 0; i < count && i < 6; ++i) {
+        IDependencyObjectABI* child = nullptr;
+        if (FAILED(helper->GetChild(node, static_cast<INT32>(i), &child)) || !child)
+            continue;
 
-    IPanelABI* panel = nullptr;
-    hr = content->QueryInterface(kIPanel, reinterpret_cast<void**>(&panel));
-    Log(L"  QI IPanel: 0x%08X", hr);
-    if (SUCCEEDED(hr) && panel) {
-        IInspectableABI* children = nullptr;
-        if (SUCCEEDED(panel->get_Children(&children)) && children) {
-            IVectorABI* vector = nullptr;
-            if (SUCCEEDED(children->QueryInterface(kIInspectable, reinterpret_cast<void**>(&vector)))) {
-                unsigned count = 0;
-                if (SUCCEEDED(vector->get_Size(&count)))
-                    Log(L"  children: %u", count);
-                vector->Release();
-            }
-            children->Release();
+        // Class name only: no IFrameworkElement QI, no size read.
+        wchar_t className[128] = L"?";
+        HSTRING hname = nullptr;
+        if (SUCCEEDED(reinterpret_cast<IInspectableABI*>(child)->GetRuntimeClassName(&hname)) && hname) {
+            UINT32 length = 0;
+            const wchar_t* raw = g_getStringRawBuffer ? g_getStringRawBuffer(hname, &length) : L"?";
+            wcsncpy_s(className, raw, _TRUNCATE);
+            if (g_deleteString)
+                g_deleteString(hname);
         }
-        panel->Release();
+
+        wchar_t indent[40] = {};
+        for (int k = 0; k < depth * 2 + 2 && k < 38; ++k)
+            indent[k] = L' ';
+        Log(L"%s[%u] %s", indent, i, className);
+
+        WalkLight(helper, child, depth + 1);
+        child->Release();
     }
-    content->Release();
 }
 
 static int Hook_OnGotFocus(void* self, void* args)
 {
-    static bool inspected = false;
-    if (!inspected) {
-        inspected = true;
-        Log(L"OnGotFocus fired: this=0x%p args=0x%p", self, args);
-        InspectView(self);
+    Log(L"hook entered: this=0x%p args=0x%p", self, args);
+
+    static bool done = false;
+    if (!done) {
+        done = true;
+        IVisualTreeHelperStaticsABI* helper = GetVisualTreeHelper();
+        if (helper) {
+            IDependencyObjectABI* root = nullptr;
+            if (SUCCEEDED(reinterpret_cast<IInspectableABI*>(self)->QueryInterface(
+                    kIDependencyObject, reinterpret_cast<void**>(&root))) && root) {
+                WalkLight(helper, root, 0);
+                root->Release();
+            }
+            helper->Release();
+        }
+        Log(L"walk complete");
     }
+
     return g_onGotFocus(self, args);
 }
 

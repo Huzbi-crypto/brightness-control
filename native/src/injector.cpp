@@ -12,28 +12,30 @@
 #include <tlhelp32.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <vector>
 
-static DWORD FindProcessId(const wchar_t* exeName)
+// ShellHost runs more than one instance on this build and the Control Center is
+// not necessarily in the first one, so every match gets the DLL.
+static std::vector<DWORD> FindProcessIds(const wchar_t* exeName)
 {
+    std::vector<DWORD> pids;
+
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshot == INVALID_HANDLE_VALUE)
-        return 0;
+        return pids;
 
-    DWORD pid = 0;
     PROCESSENTRY32W entry = {};
     entry.dwSize = sizeof(entry);
 
     if (Process32FirstW(snapshot, &entry)) {
         do {
-            if (_wcsicmp(entry.szExeFile, exeName) == 0) {
-                pid = entry.th32ProcessID;
-                break;
-            }
+            if (_wcsicmp(entry.szExeFile, exeName) == 0)
+                pids.push_back(entry.th32ProcessID);
         } while (Process32NextW(snapshot, &entry));
     }
 
     CloseHandle(snapshot);
-    return pid;
+    return pids;
 }
 
 static bool InjectInto(DWORD pid, const wchar_t* dllPath)
@@ -109,25 +111,29 @@ int wmain(int argc, wchar_t** argv)
         return 2;
     }
 
-    DWORD pid = 0;
+    std::vector<DWORD> pids;
     for (int elapsed = 0; elapsed <= waitSeconds; ++elapsed) {
-        pid = FindProcessId(exeName);
-        if (pid)
+        pids = FindProcessIds(exeName);
+        if (!pids.empty())
             break;
         if (elapsed < waitSeconds)
             Sleep(1000);
     }
 
-    if (!pid) {
+    if (pids.empty()) {
         wprintf(L"%s is not running\n", exeName);
         return 1;
     }
 
-    if (!InjectInto(pid, fullPath)) {
-        wprintf(L"injection into %s (pid %lu) failed\n", exeName, pid);
-        return 1;
+    int injected = 0;
+    for (DWORD pid : pids) {
+        if (InjectInto(pid, fullPath)) {
+            wprintf(L"injected %s into %s (pid %lu)\n", fullPath, exeName, pid);
+            ++injected;
+        } else {
+            wprintf(L"injection into %s (pid %lu) failed\n", exeName, pid);
+        }
     }
 
-    wprintf(L"injected %s into %s (pid %lu)\n", fullPath, exeName, pid);
-    return 0;
+    return injected > 0 ? 0 : 1;
 }

@@ -158,3 +158,35 @@ a `UIElement` - walk its visual children until the card container turns up.
 
 `IComponentConnector` being present also confirms `Connect` is a real hook
 target, matching what the PDB said.
+
+## Open problem: WinRT calls inside the hook kill ShellHost
+
+The detour itself is sound. A pass-through hook - log, then call the original -
+runs indefinitely with the panel opening and closing normally:
+
+```
+15:30:10.122  hook entered: this=0x19F6C0A31D8 args=0x19F77F6AB80
+```
+
+As soon as the hook touches WinRT, ShellHost dies with `0xc000001d`
+(STATUS_ILLEGAL_INSTRUCTION, faulting module "unknown") a fraction of a second
+later - *after* the work has visibly succeeded:
+
+| Probe | Result |
+|---|---|
+| pass-through, no WinRT | stable |
+| one `GetChildrenCount` | `0x00000000 count=1`, then crash |
+| full visual tree walk, depth 12 | whole tree logged, `walk complete`, then crash |
+| tree walk + `IFrameworkElement` size reads | same |
+
+So the data is correct and the crash comes after the hook returns, which points
+at the XAML state or the stack frame rather than at the vtable layout - the
+calls themselves return valid values.
+
+Next things to try, in order:
+
+1. Do the WinRT work on a `DispatcherQueue` callback posted from the hook, so
+   nothing XAML-touching runs inside the focus event itself.
+2. Same, but posted for the *next* dispatcher turn rather than inline.
+3. Check stack alignment across the relay: the hook is entered by `jmp`, not
+   `call`, and the trampoline is then reached by `call` from the hook.
