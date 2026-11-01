@@ -1,0 +1,91 @@
+// IFrameworkElement's tail, so add_Unloaded (slot 45) can be reached without
+// declaring every method before it.
+struct IFrameworkElementUnloadedABI : IInspectableABI
+{
+    virtual void* s06();  // slot 6
+    virtual void* s07();  // slot 7
+    virtual void* s08();  // slot 8
+    virtual void* s09();  // slot 9
+    virtual void* s10();  // slot 10
+    virtual void* s11();  // slot 11
+    virtual void* s12();  // slot 12
+    virtual void* s13();  // slot 13
+    virtual void* s14();  // slot 14
+    virtual void* s15();  // slot 15
+    virtual void* s16();  // slot 16
+    virtual void* s17();  // slot 17
+    virtual void* s18();  // slot 18
+    virtual void* s19();  // slot 19
+    virtual void* s20();  // slot 20
+    virtual void* s21();  // slot 21
+    virtual void* s22();  // slot 22
+    virtual void* s23();  // slot 23
+    virtual void* s24();  // slot 24
+    virtual void* s25();  // slot 25
+    virtual void* s26();  // slot 26
+    virtual void* s27();  // slot 27
+    virtual void* s28();  // slot 28
+    virtual void* s29();  // slot 29
+    virtual void* s30();  // slot 30
+    virtual void* s31();  // slot 31
+    virtual void* s32();  // slot 32
+    virtual void* s33();  // slot 33
+    virtual void* s34();  // slot 34
+    virtual void* s35();  // slot 35
+    virtual void* s36();  // slot 36
+    virtual void* s37();  // slot 37
+    virtual void* s38();  // slot 38
+    virtual void* s39();  // slot 39
+    virtual void* s40();  // slot 40
+    virtual void* s41();  // slot 41
+    virtual void* s42();  // slot 42
+    virtual void* s43();  // slot 43
+    virtual void* s44();  // slot 44
+    virtual HRESULT STDMETHODCALLTYPE add_Unloaded(void* handler, INT64* token) = 0;  // slot 45
+};
+
+// The flyout closing is the only reliable signal that the next OnGotFocus is a
+// real open rather than focus moving to a control inside it.
+static bool g_flyoutClosed = true;
+
+struct UnloadedHandler : IUnknown
+{
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override
+    {
+        if (!ppv)
+            return E_POINTER;
+        if (riid == kIRoutedEventHandler || riid == IID_IUnknown || riid == kIAgileObject) {
+            *ppv = this;
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return 2; }
+    ULONG STDMETHODCALLTYPE Release() override { return 1; }
+
+    virtual HRESULT STDMETHODCALLTYPE Invoke(IInspectableABI*, void*)
+    {
+        g_flyoutClosed = true;
+        Log(L"flyout: unloaded");
+        return S_OK;
+    }
+};
+
+static UnloadedHandler g_unloadedHandler;
+
+static void AttachUnloaded(void* view)
+{
+    if (!view)
+        return;
+    IFrameworkElementUnloadedABI* element = nullptr;
+    if (FAILED(reinterpret_cast<IInspectableABI*>(view)->QueryInterface(
+            kIFrameworkElement, reinterpret_cast<void**>(&element))) || !element)
+        return;
+    INT64 token = 0;
+    HRESULT hr = element->add_Unloaded(&g_unloadedHandler, &token);
+    Log(L"flyout: add_Unloaded 0x%08X", hr);
+    element->Release();
+}
+

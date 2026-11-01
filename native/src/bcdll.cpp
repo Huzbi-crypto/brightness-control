@@ -195,7 +195,7 @@ struct IUIElementVisibilityABI : IInspectableABI
     virtual void* v4(); virtual void* v5(); virtual void* v6(); virtual void* v7();
     virtual void* v8(); virtual void* v9(); virtual void* v10(); virtual void* v11();
     virtual void* v12(); virtual void* v13(); virtual void* v14();
-    virtual void* unusedGetVisibility();                            // slot 21
+    virtual HRESULT STDMETHODCALLTYPE get_Visibility(int* value) = 0;   // slot 21
     virtual HRESULT STDMETHODCALLTYPE put_Visibility(int value) = 0;  // slot 22
 };
 
@@ -823,6 +823,24 @@ static void BuildChevron()
     }
 
     IInspectableABI* button = Activate(L"Windows.UI.Xaml.Controls.Button");
+    if (button) {
+        IInspectableABI* clear = Activate(L"Windows.UI.Xaml.Media.SolidColorBrush");
+        if (clear) {
+            ISolidColorBrushABI* solid = nullptr;
+            if (SUCCEEDED(clear->QueryInterface(kISolidColorBrush, reinterpret_cast<void**>(&solid))) && solid) {
+                ColorABI transparent = { 0, 0, 0, 0 };
+                solid->put_Color(transparent);
+                solid->Release();
+            }
+            IControlABI* control = nullptr;
+            if (SUCCEEDED(button->QueryInterface(kIControl, reinterpret_cast<void**>(&control))) && control) {
+                HRESULT hrBg = control->put_Background(clear);
+                Log(L"chevron: put_Background 0x%08X", hrBg);
+                control->Release();
+            }
+            clear->Release();
+        }
+    }
     if (!button) {
         if (text) text->Release();
         row->Release();
@@ -1455,11 +1473,16 @@ static void RememberView(void* view)
     if (g_viewCount < 8)
         g_views[g_viewCount++] = view;
 }
-static int g_pendingAction = 0;  // 0 = inspect, 1 = collapse panel
+static int g_pendingAction = 0;  // 0 = inspect, 1 = reset to the main page
+static ULONGLONG g_navigatedAt;  // defined with the sub-page code below
+static void AttachUnloaded(void* view);  // defined below
 
 static void DoDeferredInspect()
 {
     if (g_pendingAction == 1) {
+        // A click inside the flyout re-fires OnGotFocus; that is not an open.
+        // Resetting there hides the sub-page the click just opened, which is
+        // why the panel flashed and vanished.
         // Every open starts collapsed. The shell rebuilds the flyout's content,
         // so the panel is looked up in the current tree rather than trusted from
         // a cached pointer - hiding a stale element silently does nothing.
@@ -1475,20 +1498,41 @@ static void DoDeferredInspect()
 
         // Reset to the main page: the flyout is rebuilt on open, so the
         // sub-page (if the shell kept it) goes away and L1Grid comes back.
-        int reset = 0;
+        // Only the view that actually holds our sub-page is ours to touch. The
+        // shell keeps a second ControlCenterView whose grid is always visible,
+        // and acting on that one undid the navigation every time.
+        //
+        // In our view: sub-page visible + grid collapsed means the user is on
+        // it, so leave it. Both visible is the real overlap (left over from a
+        // previous open), and that is the only case to repair.
+        int hidden = 0, leftAlone = 0;
         for (int v = 0; v < g_viewCount; ++v) {
             IDependencyObjectABI* root = nullptr;
             if (FAILED(reinterpret_cast<IInspectableABI*>(g_views[v])->QueryInterface(
                     kIDependencyObject, reinterpret_cast<void**>(&root))) || !root)
                 continue;
 
-            if (IDependencyObjectABI* sub = FindByName(finder, root, L"BCBrightnessPage", 0)) {
-                SetVisibility(sub, 1);
-                sub->Release();
-                ++reset;
+            IDependencyObjectABI* sub = FindByName(finder, root, L"BCBrightnessPage", 0);
+            if (!sub) {
+                root->Release();
+                continue;  // not our view
             }
-            if (IDependencyObjectABI* grid = FindByName(finder, root, L"L1Grid", 0)) {
-                SetVisibility(grid, 0);
+
+            int subVisible = 1;
+            IUIElementVisibilityABI* subElement = nullptr;
+            if (SUCCEEDED(sub->QueryInterface(kIUIElement, reinterpret_cast<void**>(&subElement))) && subElement) {
+                subElement->get_Visibility(&subVisible);
+                subElement->Release();
+            }
+
+            IDependencyObjectABI* grid = FindByName(finder, root, L"L1Grid", 0);
+            int gridVisible = 0;
+            if (grid) {
+                IUIElementVisibilityABI* gridElement = nullptr;
+                if (SUCCEEDED(grid->QueryInterface(kIUIElement, reinterpret_cast<void**>(&gridElement))) && gridElement) {
+                    gridElement->get_Visibility(&gridVisible);
+                    gridElement->Release();
+                }
                 if (g_l1Grid != grid) {
                     if (g_l1Grid)
                         g_l1Grid->Release();
@@ -1496,11 +1540,18 @@ static void DoDeferredInspect()
                     grid->AddRef();
                 }
                 grid->Release();
-                ++reset;
             }
+
+            if (subVisible == 0 && gridVisible == 0) {
+                SetVisibility(sub, 1);  // both showing: the stale overlap
+                ++hidden;
+            } else {
+                ++leftAlone;
+            }
+            sub->Release();
             root->Release();
         }
-        Log(L"panel: reset to main page (%d element(s))", reset);
+        Log(L"panel: overlap hidden=%d, left alone=%d", hidden, leftAlone);
         g_panelVisible = false;
 
         if (viewObject)
@@ -1511,6 +1562,7 @@ static void DoDeferredInspect()
     }
 
     void* view = g_pendingView;
+    AttachUnloaded(view);
     Log(L"deferred callback: view=0x%p", view);
     if (view)
         InspectView(view);
@@ -1872,6 +1924,9 @@ static void AddPanelRow(IInspectableABI* content)
 
 static IDependencyObjectABI* g_pageParent = nullptr;
 static IInspectableABI* g_subPage = nullptr;
+// When the sub-page was last opened. A click inside the flyout re-fires
+// OnGotFocus, and resetting on that hides the page the click just opened.
+// (declared near DoDeferredInspect)
 
 static void NavigateBack();
 
@@ -1909,6 +1964,24 @@ static IInspectableABI* MakeIconButton(const wchar_t* glyph, void* handler)
     IInspectableABI* button = Activate(L"Windows.UI.Xaml.Controls.Button");
     if (!button)
         return nullptr;
+
+    // Same hit-test reason as the chevron: a null Background only responds on
+    // the glyph, so the button appears dead everywhere else.
+    IInspectableABI* clear = Activate(L"Windows.UI.Xaml.Media.SolidColorBrush");
+    if (clear) {
+        ISolidColorBrushABI* solid = nullptr;
+        if (SUCCEEDED(clear->QueryInterface(kISolidColorBrush, reinterpret_cast<void**>(&solid))) && solid) {
+            ColorABI transparent = { 0, 0, 0, 0 };
+            solid->put_Color(transparent);
+            solid->Release();
+        }
+        IControlABI* control = nullptr;
+        if (SUCCEEDED(button->QueryInterface(kIControl, reinterpret_cast<void**>(&control))) && control) {
+            control->put_Background(clear);
+            control->Release();
+        }
+        clear->Release();
+    }
 
     IInspectableABI* text = Activate(L"Windows.UI.Xaml.Controls.TextBlock");
     if (text) {
@@ -2031,6 +2104,25 @@ static IInspectableABI* BuildBrightnessSubPage()
 
 static void NavigateToBrightness()
 {
+    // The grid pointer goes stale whenever the shell rebuilds the flyout, so
+    // look it up in the live tree rather than trusting the cached one.
+    if (!g_l1Grid) {
+        IVisualTreeHelperStaticsABI* finder = GetVisualTreeHelper();
+        if (finder) {
+            for (int v = 0; v < g_viewCount && !g_l1Grid; ++v) {
+                IDependencyObjectABI* root = nullptr;
+                if (SUCCEEDED(reinterpret_cast<IInspectableABI*>(g_views[v])->QueryInterface(
+                        kIDependencyObject, reinterpret_cast<void**>(&root))) && root) {
+                    g_l1Grid = FindByName(finder, root, L"L1Grid", 0);
+                    root->Release();
+                    if (g_l1Grid)
+                        Log(L"nav: L1Grid found by name");
+                }
+            }
+            finder->Release();
+        }
+    }
+
     if (!g_l1Grid) {
         Log(L"nav: no L1Grid");
         return;
@@ -2062,6 +2154,7 @@ static void NavigateToBrightness()
 
     // Swap: the shell's grid goes away, the sub-page takes its place.
     SetVisibility(g_l1Grid, 1);
+    g_navigatedAt = GetTickCount64();
     IDependencyObjectABI* pageObject = nullptr;
     if (SUCCEEDED(g_subPage->QueryInterface(kIDependencyObject, reinterpret_cast<void**>(&pageObject))) && pageObject) {
         HRESULT hr = SetVisibility(pageObject, 0);
@@ -2091,6 +2184,101 @@ static void ShowMonitorPanel()
 
 
 
+// IFrameworkElement's tail, so add_Unloaded (slot 45) can be reached without
+// declaring every method before it.
+struct IFrameworkElementUnloadedABI : IInspectableABI
+{
+    virtual void* s06();  // slot 6
+    virtual void* s07();  // slot 7
+    virtual void* s08();  // slot 8
+    virtual void* s09();  // slot 9
+    virtual void* s10();  // slot 10
+    virtual void* s11();  // slot 11
+    virtual void* s12();  // slot 12
+    virtual void* s13();  // slot 13
+    virtual void* s14();  // slot 14
+    virtual void* s15();  // slot 15
+    virtual void* s16();  // slot 16
+    virtual void* s17();  // slot 17
+    virtual void* s18();  // slot 18
+    virtual void* s19();  // slot 19
+    virtual void* s20();  // slot 20
+    virtual void* s21();  // slot 21
+    virtual void* s22();  // slot 22
+    virtual void* s23();  // slot 23
+    virtual void* s24();  // slot 24
+    virtual void* s25();  // slot 25
+    virtual void* s26();  // slot 26
+    virtual void* s27();  // slot 27
+    virtual void* s28();  // slot 28
+    virtual void* s29();  // slot 29
+    virtual void* s30();  // slot 30
+    virtual void* s31();  // slot 31
+    virtual void* s32();  // slot 32
+    virtual void* s33();  // slot 33
+    virtual void* s34();  // slot 34
+    virtual void* s35();  // slot 35
+    virtual void* s36();  // slot 36
+    virtual void* s37();  // slot 37
+    virtual void* s38();  // slot 38
+    virtual void* s39();  // slot 39
+    virtual void* s40();  // slot 40
+    virtual void* s41();  // slot 41
+    virtual void* s42();  // slot 42
+    virtual void* s43();  // slot 43
+    virtual void* s44();  // slot 44
+    virtual HRESULT STDMETHODCALLTYPE add_Unloaded(void* handler, INT64* token) = 0;  // slot 45
+};
+
+// The flyout closing is the only reliable signal that the next OnGotFocus is a
+// real open rather than focus moving to a control inside it.
+static bool g_flyoutClosed = true;
+
+struct UnloadedHandler : IUnknown
+{
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override
+    {
+        if (!ppv)
+            return E_POINTER;
+        if (riid == kIRoutedEventHandler || riid == IID_IUnknown || riid == kIAgileObject) {
+            *ppv = this;
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return 2; }
+    ULONG STDMETHODCALLTYPE Release() override { return 1; }
+
+    virtual HRESULT STDMETHODCALLTYPE Invoke(IInspectableABI*, void*)
+    {
+        g_flyoutClosed = true;
+        Log(L"flyout: unloaded");
+        return S_OK;
+    }
+};
+
+static UnloadedHandler g_unloadedHandler;
+
+static void AttachUnloaded(void* view)
+{
+    Log(L"flyout: AttachUnloaded view=0x%p", view);
+    if (!view)
+        return;
+    IFrameworkElementUnloadedABI* element = nullptr;
+    HRESULT hrQi = reinterpret_cast<IInspectableABI*>(view)->QueryInterface(
+        kIFrameworkElement, reinterpret_cast<void**>(&element));
+    if (FAILED(hrQi) || !element) {
+        Log(L"flyout: QI IFrameworkElement 0x%08X", hrQi);
+        return;
+    }
+    INT64 token = 0;
+    HRESULT hr = element->add_Unloaded(&g_unloadedHandler, &token);
+    Log(L"flyout: add_Unloaded 0x%08X", hr);
+    element->Release();
+}
+
 static int Hook_OnGotFocus(void* self, void* args)
 {
     // Nothing XAML-touching here: capture the view, post the work, get out.
@@ -2102,8 +2290,8 @@ static int Hook_OnGotFocus(void* self, void* args)
         g_pendingAction = 0;
         QueueDeferredInspect(self);
     } else {
-        // Every later open resets to the main page, in case the flyout was left
-        // on the brightness sub-page.
+        // Queue the check every time; it decides from L1Grid's visibility
+        // whether this is a reopen or focus moving inside the flyout.
         g_pendingAction = 1;
         QueueDeferredInspect(self);
     }
