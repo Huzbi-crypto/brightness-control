@@ -708,7 +708,8 @@ struct IControlABI : IInspectableABI
     virtual void* c24(); virtual void* c25(); virtual void* c26(); virtual void* c27();
     virtual void* c28(); virtual void* c29(); virtual void* c30();
     virtual HRESULT STDMETHODCALLTYPE put_Background(IInspectableABI* value) = 0;   // slot 37
-    virtual HRESULT STDMETHODCALLTYPE put_BorderBrush(IInspectableABI* value) = 0;  // slot 38
+    virtual void* c31(); virtual void* c32(); virtual void* c33();                  // slots 38-40
+    virtual HRESULT STDMETHODCALLTYPE put_BorderBrush(IInspectableABI* value) = 0;  // slot 41
 };
 
 // IStackPanel: put_Orientation is method 3 (slot 9).
@@ -754,6 +755,45 @@ struct ClickHandler : IUnknown
 
 static ClickHandler g_clickHandler;
 
+// One icon-font glyph. TextBlock + FontFamily is the path that demonstrably
+// renders these codepoints; a FontIcon came out as a tofu box here.
+static IInspectableABI* MakeGlyph(const wchar_t* glyph, double size, BYTE alpha)
+{
+    IInspectableABI* text = Activate(L"Windows.UI.Xaml.Controls.TextBlock");
+    if (!text)
+        return nullptr;
+
+    ITextBlockABI* textBlock = nullptr;
+    if (SUCCEEDED(text->QueryInterface(kITextBlock, reinterpret_cast<void**>(&textBlock))) && textBlock) {
+        HSTRING value = nullptr;
+        g_createString(glyph, 1, &value);
+        textBlock->put_Text(value);
+        g_deleteString(value);
+        textBlock->put_FontSize(size);
+
+        IInspectableABI* family = MakeFontFamily(L"Segoe Fluent Icons");
+        if (family) {
+            HRESULT hrFont = textBlock->put_FontFamily(family);
+            Log(L"glyph: put_FontFamily 0x%08X size=%.0f", hrFont, size);
+            family->Release();
+        }
+
+        IInspectableABI* brush = Activate(L"Windows.UI.Xaml.Media.SolidColorBrush");
+        if (brush) {
+            ISolidColorBrushABI* solid = nullptr;
+            if (SUCCEEDED(brush->QueryInterface(kISolidColorBrush, reinterpret_cast<void**>(&solid))) && solid) {
+                ColorABI colour = { alpha, 255, 255, 255 };
+                solid->put_Color(colour);
+                solid->Release();
+            }
+            textBlock->put_Foreground(brush);
+            brush->Release();
+        }
+        textBlock->Release();
+    }
+    return text;
+}
+
 static void BuildChevron()
 {
     if (!g_stockSlider) {
@@ -786,40 +826,32 @@ static void BuildChevron()
     DescribeNode(row, rowName, 128, &rowW, &rowH);
     Log(L"chevron: row is %s %.0fx%.0f", rowName, rowW, rowH);
 
-    // A glyph, because an empty Button has no visual content.
-    IInspectableABI* text = Activate(L"Windows.UI.Xaml.Controls.TextBlock");
+    // Two glyphs, pairing the brightness mark with a chevron the way the volume
+    // row pairs its speaker icon with one - a bare arrow in a box read as bland.
+    IInspectableABI* text = Activate(L"Windows.UI.Xaml.Controls.StackPanel");
     if (text) {
-        ITextBlockABI* textBlock = nullptr;
-        if (SUCCEEDED(text->QueryInterface(kITextBlock, reinterpret_cast<void**>(&textBlock))) && textBlock) {
-            HSTRING glyph = nullptr;
-            const wchar_t* chevron = L"\xE76C";  // Segoe Fluent Icons: ChevronRight
-            g_createString(chevron, 1, &glyph);
-            HRESULT hrText = textBlock->put_Text(glyph);
-            Log(L"chevron: put_Text 0x%08X", hrText);
-            g_deleteString(glyph);
-            textBlock->put_FontSize(14);
-
-            IInspectableABI* fontFamily = MakeFontFamily(L"Segoe Fluent Icons");
-            if (fontFamily) {
-                HRESULT hrFont = textBlock->put_FontFamily(fontFamily);
-                Log(L"chevron: put_FontFamily 0x%08X", hrFont);
-                fontFamily->Release();
-            }
-
-            IInspectableABI* brush = Activate(L"Windows.UI.Xaml.Media.SolidColorBrush");
-            if (brush) {
-                ISolidColorBrushABI* solid = nullptr;
-                if (SUCCEEDED(brush->QueryInterface(kISolidColorBrush, reinterpret_cast<void**>(&solid))) && solid) {
-                    ColorABI white = { 255, 255, 255, 255 };
-                    HRESULT hrColor = solid->put_Color(white);
-                    HRESULT hrFg = textBlock->put_Foreground(brush);
-                    Log(L"chevron: put_Color 0x%08X put_Foreground 0x%08X", hrColor, hrFg);
-                    solid->Release();
-                }
-                brush->Release();
-            }
-            textBlock->Release();
+        IStackPanelABI* stack = nullptr;
+        if (SUCCEEDED(text->QueryInterface(kIStackPanel, reinterpret_cast<void**>(&stack))) && stack) {
+            HRESULT hrOrientation = stack->put_Orientation(1);  // Horizontal
+            Log(L"chevron: put_Orientation 0x%08X", hrOrientation);
+            stack->Release();
         }
+
+        IFrameworkElementABI* stackElement = nullptr;
+        if (SUCCEEDED(text->QueryInterface(kIFrameworkElement, reinterpret_cast<void**>(&stackElement))) && stackElement) {
+            stackElement->put_HorizontalAlignment(1);  // Centre
+            stackElement->Release();
+        }
+
+        if (IInspectableABI* brightness = MakeGlyph(L"\xE706", 15, 255)) {  // Brightness
+            AppendChild(text, brightness);
+            brightness->Release();
+        }
+        if (IInspectableABI* chevron = MakeGlyph(L"\xE76C", 9, 200)) {  // ChevronRight
+            AppendChild(text, chevron);
+            chevron->Release();
+        }
+        Log(L"chevron: composite icon built");
     }
 
     IInspectableABI* button = Activate(L"Windows.UI.Xaml.Controls.Button");
