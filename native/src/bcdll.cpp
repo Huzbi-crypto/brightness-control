@@ -181,6 +181,7 @@ struct IVectorABI : IInspectableABI
 
 static const IID kIContentControl = { 0xa26dd1dc, 0xcd44, 0x435c, { 0xbe, 0x94, 0x01, 0xd6, 0x24, 0x1c, 0x23, 0x1c } };
 static const IID kIPanel = { 0xa50a4bbd, 0x8361, 0x469c, { 0x90, 0xda, 0xe9, 0xa4, 0x0c, 0x74, 0x74, 0xdf } };
+static const IID kIUIElement = { 0x676d0be9, 0xb65c, 0x41c6, { 0xba, 0x40, 0x58, 0xcf, 0x87, 0xf2, 0x01, 0xc1 } };
 static const IID kIInspectable = { 0xaf86e2e0, 0xb12d, 0x4c6a, { 0x9c, 0x5a, 0xd7, 0xaa, 0x65, 0x10, 0x1e, 0x90 } };
 
 static void LogClassName(const wchar_t* label, IInspectableABI* object)
@@ -527,54 +528,53 @@ static void InsertPanelIntoGrid()
         slider->Release();
     }
 
-    // Grid.SetRow faults when called through the static interface, so set the
-    // same attached property directly: Grid.RowProperty + a boxed Int32.
-    HSTRING gridName = nullptr;
-    const wchar_t* gridClass = L"Windows.UI.Xaml.Controls.Grid";
-    g_createString(gridClass, static_cast<UINT32>(wcslen(gridClass)), &gridName);
-    void* gridFactory = nullptr;
-    HRESULT hrFactory = g_roGetActivationFactory(gridName, kIActivationFactory, &gridFactory);
-    g_deleteString(gridName);
-
-    if (SUCCEEDED(hrFactory) && gridFactory) {
-        IGridStaticsABI* statics = nullptr;
-        HRESULT hrStatics = reinterpret_cast<IInspectableABI*>(gridFactory)->QueryInterface(
-            kIGridStatics, reinterpret_cast<void**>(&statics));
-        if (SUCCEEDED(hrStatics) && statics) {
-            IDependencyObjectABI* rowProperty = nullptr;
-            HRESULT hrProp = statics->get_RowProperty(&rowProperty);
-            Log(L"insert: get_RowProperty 0x%08X", hrProp);
-
-            HSTRING pvName = nullptr;
-            const wchar_t* pvClass = L"Windows.Foundation.PropertyValue";
-            g_createString(pvClass, static_cast<UINT32>(wcslen(pvClass)), &pvName);
-            void* pvFactory = nullptr;
-            HRESULT hrPv = g_roGetActivationFactory(pvName, kIActivationFactory, &pvFactory);
-            g_deleteString(pvName);
-
-            if (SUCCEEDED(hrPv) && pvFactory) {
-                IPropertyValueStaticsABI* pv = nullptr;
-                HRESULT hrPvQI = reinterpret_cast<IInspectableABI*>(pvFactory)->QueryInterface(
-                    kIPropertyValueStatics, reinterpret_cast<void**>(&pv));
-                if (SUCCEEDED(hrPvQI) && pv) {
-                    IInspectableABI* boxed = nullptr;
-                    HRESULT hrBox = pv->CreateInt32(static_cast<int>(newRow), &boxed);
-                    Log(L"insert: CreateInt32(%u) 0x%08X", newRow, hrBox);
-                    if (SUCCEEDED(hrBox) && boxed) {
-                        HRESULT hrSet = reinterpret_cast<IDependencyObjectSetValueABI*>(panel)
-                                            ->SetValue(rowProperty, boxed);
-                        Log(L"insert: SetValue(Grid.Row, %u) 0x%08X", newRow, hrSet);
-                        boxed->Release();
+    // SetRow on the factory's static interface faults no matter what it is
+    // given, so set Grid.RowProperty directly. The element has to be QI'd to
+    // IDependencyObject first: RoActivateInstance hands back IInspectable,
+    // whose vtable is not IDependencyObject's.
+    IInspectableABI* panelObject = nullptr;
+    HRESULT hrObject = panel->QueryInterface(kIDependencyObject, reinterpret_cast<void**>(&panelObject));
+    Log(L"insert: QI IDependencyObject on panel 0x%08X", hrObject);
+    if (SUCCEEDED(hrObject) && panelObject) {
+        HSTRING gridName = nullptr;
+        const wchar_t* gridClass = L"Windows.UI.Xaml.Controls.Grid";
+        g_createString(gridClass, static_cast<UINT32>(wcslen(gridClass)), &gridName);
+        void* gridFactory = nullptr;
+        HRESULT hrFactory = g_roGetActivationFactory(gridName, kIActivationFactory, &gridFactory);
+        g_deleteString(gridName);
+        if (SUCCEEDED(hrFactory) && gridFactory) {
+            IGridStaticsABI* statics = nullptr;
+            if (SUCCEEDED(reinterpret_cast<IInspectableABI*>(gridFactory)->QueryInterface(
+                    kIGridStatics, reinterpret_cast<void**>(&statics))) && statics) {
+                IDependencyObjectABI* rowProperty = nullptr;
+                if (SUCCEEDED(statics->get_RowProperty(&rowProperty)) && rowProperty) {
+                    HSTRING pvName = nullptr;
+                    const wchar_t* pvClass = L"Windows.Foundation.PropertyValue";
+                    g_createString(pvClass, static_cast<UINT32>(wcslen(pvClass)), &pvName);
+                    void* pvFactory = nullptr;
+                    if (SUCCEEDED(g_roGetActivationFactory(pvName, kIActivationFactory, &pvFactory)) && pvFactory) {
+                        IPropertyValueStaticsABI* pv = nullptr;
+                        if (SUCCEEDED(reinterpret_cast<IInspectableABI*>(pvFactory)->QueryInterface(
+                                kIPropertyValueStatics, reinterpret_cast<void**>(&pv))) && pv) {
+                            IInspectableABI* boxed = nullptr;
+                            if (SUCCEEDED(pv->CreateInt32(static_cast<int>(newRow), &boxed)) && boxed) {
+                                HRESULT hrSet = reinterpret_cast<IDependencyObjectSetValueABI*>(panelObject)
+                                                    ->SetValue(rowProperty, boxed);
+                                Log(L"insert: SetValue(Grid.Row, %u) 0x%08X", newRow, hrSet);
+                                boxed->Release();
+                            }
+                            pv->Release();
+                        }
+                        reinterpret_cast<IInspectableABI*>(pvFactory)->Release();
                     }
-                    pv->Release();
+                    g_deleteString(pvName);
+                    rowProperty->Release();
                 }
-                reinterpret_cast<IInspectableABI*>(pvFactory)->Release();
+                statics->Release();
             }
-            if (rowProperty)
-                rowProperty->Release();
-            statics->Release();
+            reinterpret_cast<IInspectableABI*>(gridFactory)->Release();
         }
-        reinterpret_cast<IInspectableABI*>(gridFactory)->Release();
+        panelObject->Release();
     }
 
     IPanelABI* gridPanel = nullptr;

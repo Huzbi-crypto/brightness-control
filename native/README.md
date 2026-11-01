@@ -245,8 +245,21 @@ that fourth row is the open problem:
 | `SetValue(Grid.RowProperty, boxed Int32 3)` | returns `0x00000313`, no crash, row unchanged |
 | append without any row set | renders in row 0, above the toggles |
 
-So the remaining work is purely placement. Either find why `SetRow` faults
-(the static interface may not be callable from an injected DLL the way an
-instance interface is), or get the appended row to actually take space - the
-grid is 358x386 and rows 0..2 already fill it, so a fourth Auto row may simply
-be measuring to zero and letting the child overflow at the top.
+**Solved.** The element was being handed to `SetRow`/`SetValue` as the pointer
+`RoActivateInstance` returned, which is an `IInspectable*` - its vtable is not
+`IDependencyObject`'s. QI for the interface first and both work:
+
+```
+insert: QI IDependencyObject on panel 0x00000000
+insert: SetValue(Grid.Row, 3) 0x00000000
+insert: append panel to L1Grid 0x00000000
+insert: L1Grid children 4 -> 5
+```
+
+The row now renders inside the panel, below the battery/settings row. `SetRow`
+on the factory's static interface still faults even with a correct `IUIElement`,
+so the dependency-property route is what is used.
+
+Remaining polish: the row sits after the footer because it is appended as the
+last RowDefinition. To sit between the volume slider and the footer it has to go
+in row 2 with the footer shifted to row 3.
