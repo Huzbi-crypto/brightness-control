@@ -33,8 +33,6 @@ namespace BrightnessControl
         private readonly NotifyIcon _icon;
         private readonly QuickPanel _panel;
         private readonly GlobalHooks _hooks;
-        private readonly QuickSettingsCard _qsCard;
-        private readonly QuickSettingsWatcher _qsWatcher;
         private readonly Thread _worker;
         private readonly string _configPath;
         private readonly string _startupVbs;
@@ -85,13 +83,6 @@ namespace BrightnessControl
                 if (e.Button == MouseButtons.Left) TogglePanel();
             };
             _icon.ContextMenuStrip = BuildMenu();
-
-            _qsCard = new QuickSettingsCard(Display.ExternalName());
-            _qsCard.ValueChanged += OnCardValue;
-            _qsWatcher = new QuickSettingsWatcher(_qsCard, OnCardValue, delegate { return _cachedExternal; });
-            // Force handle creation on the UI thread; the watcher marshals onto it.
-            IntPtr qsHandle = _qsCard.Handle;
-            _qsWatcher.Start();
 
             _hooks = new GlobalHooks(_intercept);
             _hooks.InterceptWinA = _intercept;
@@ -201,21 +192,6 @@ namespace BrightnessControl
         {
             if (_panel.Visible) HidePanel();
             else ShowPanel();
-        }
-
-        /// <summary>Drag on the card attached under Quick Settings.</summary>
-        private void OnCardValue(int v)
-        {
-            _cachedExternal = v;
-            _pendingExternal = v;
-            if (_linked)
-            {
-                _cachedInternal = v;
-                _pendingInternal = v;
-                if (_panel.Visible) _panel.UpdateValues(v, v);
-            }
-            else if (_panel.Visible) _panel.UpdateValues(-1, v);
-            _wake.Set();
         }
 
         private void OnLaptopChanged(int v)
@@ -428,7 +404,6 @@ namespace BrightnessControl
         private void ExitApp()
         {
             _running = false;
-            _qsWatcher.Stop();
             _hooks.Dispose();
             _icon.Visible = false;
             _icon.Dispose();

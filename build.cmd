@@ -7,6 +7,6 @@ if not exist "%CSC%" (
 )
 "%CSC%" /nologo /target:winexe /optimize+ /out:BrightnessControl.exe ^
   /r:System.dll /r:System.Management.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll ^
-  src\Display.cs src\Controls.cs src\Hooks.cs src\QuickPanel.cs src\QuickSettings.cs src\Program.cs
+  src\Display.cs src\Controls.cs src\Hooks.cs src\QuickPanel.cs src\Program.cs
 if errorlevel 1 exit /b 1
 echo Built BrightnessControl.exe
