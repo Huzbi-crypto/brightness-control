@@ -16,7 +16,7 @@ running inside `ShellHost`; the XAML work comes after that.
 |---|---|
 | Injector loads a DLL into `ShellHost.exe` | **done** - verified, logs from pid 10432 |
 | DLL reports from inside the host | **done** |
-| Hook the view lifecycle to get the XAML root | next |
+| Hook the view lifecycle to get the XAML root | **done** - hook fires with the view object |
 | Insert the brightness row (WinRT XAML) | not started |
 | Wire the row to DDC/CI | not started |
 
@@ -107,3 +107,30 @@ implemented independently here:
    app in `../src` already uses and has verified.
 
 No code from that mod is copied; only the technique is shared.
+
+## The hook
+
+`src/bcdll.cpp` installs a 5-byte `E9` detour on `ControlCenterView::OnGotFocus`
+and logs the implementation object it receives:
+
+```
+14:54:13.048  OnGotFocus: rva=0xC0950 va=0x7FFFFDD10950 first bytes 40 53 48 83 EC
+14:54:13.051  OnGotFocus hooked; trampoline=0x7FFFFDC40000 hook=0x7FF81ABE1000
+14:54:27.330  OnGotFocus fired: this=0x1EF27078D78 args=0x1EF30EEC8C0
+```
+
+Two details that make it safe:
+
+- The relay stub is allocated with `VirtualAlloc` scanning outward from the
+  target, because `E9 rel32` only reaches 2 GB. The trampoline itself ends in an
+  absolute `mov rax, imm64; jmp rax`, so it has no distance limit.
+- The hook refuses to install if the target already begins with `E9`. With the
+  Windhawk mod enabled that is exactly what is there, and patching over another
+  detour's trampoline corrupts it.
+
+This is why the mod has to be disabled while developing:
+
+```powershell
+Set-ItemProperty HKLM:\SOFTWARE\Windhawk\Engine\Mods\per-monitor-brightness -Name Disabled -Value 1
+Restart-Service Windhawk -Force
+```
