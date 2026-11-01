@@ -2187,11 +2187,11 @@ static IInspectableABI* BuildBrightnessSubPage()
     }
     SetElementName(page, L"BCBrightnessPage");
 
-    // Breathing room at the top: the header was sitting against the panel edge.
+    // Breathing room on every side: the rows were hard against the panel's edge.
     IFrameworkElementABI* pageElement = nullptr;
     if (SUCCEEDED(page->QueryInterface(kIFrameworkElement, reinterpret_cast<void**>(&pageElement))) && pageElement) {
-        ThicknessABI topGap = { 0, 12, 0, 0 };
-        pageElement->put_Margin(topGap);
+        ThicknessABI pageGap = { 14, 12, 14, 0 };
+        pageElement->put_Margin(pageGap);
         pageElement->Release();
     }
 
@@ -2215,6 +2215,14 @@ static IInspectableABI* BuildBrightnessSubPage()
             back->Release();
         }
         if (IInspectableABI* title = MakeLabel(L"Brightness")) {
+            // Space between the back arrow and the title; they were touching.
+            IFrameworkElementABI* titleElement = nullptr;
+            if (SUCCEEDED(title->QueryInterface(kIFrameworkElement, reinterpret_cast<void**>(&titleElement))) && titleElement) {
+                ThicknessABI titleGap = { 14, 0, 0, 0 };
+                titleElement->put_Margin(titleGap);
+                titleElement->put_VerticalAlignment(1);  // Centre
+                titleElement->Release();
+            }
             AppendChild(header, title);
             title->Release();
         }
