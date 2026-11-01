@@ -30,14 +30,16 @@ few elements added to it.
 | Piece | Role | Size |
 |---|---|---|
 | `bcdll.dll` | Injected into `ShellHost.exe`. Hooks the flyout, adds the chevron and the Brightness sub-page, listens to the sliders. | 178 KB on disk |
-| `bcinject.exe` | Injects the DLL once and exits. | 158 KB, transient |
-| `bcsync.exe` | Resident DDC/CI writer. Sleeps on a named event and does nothing until signalled. | 5.9 MB working set |
+| `bcsync.exe` | The resident agent. Keeps the DLL injected (including after Windows restarts the shell) and writes DDC/CI. | 5.9 MB working set |
+| `bcinject.exe` | Manual injector, for debugging. The agent does this itself. | 158 KB, transient |
 
 The C# tray app this replaced ran at ~37 MB.
 
 ## The flow
 
-1. `bcinject.exe` injects `bcdll.dll` into `ShellHost.exe`.
+1. `bcsync.exe` starts at logon and injects `bcdll.dll` into every `ShellHost.exe`
+   it finds. It watches those processes and re-injects whenever Windows restarts
+   the shell, so the chevron keeps working without anyone re-running anything.
 2. When Quick Settings opens, `ControlCenterView::OnGotFocus` fires. The hook
    records the view pointer and posts the real work to the DispatcherQueue —
    touching XAML from inside the hook itself takes the shell down.
@@ -63,29 +65,49 @@ from a normal process. So the VCP write lives in `bcsync.exe`; the DLL and the
 helper share a named page and a named event, and the helper stays asleep until
 there is something to write.
 
-## Build
+## Install
 
-Needs Visual Studio Build Tools with the C++ workload (MSVC and the Windows SDK).
-`build.cmd` locates the toolchain with `vswhere` and calls `vcvars64`:
+Download the latest release, extract the zip, and run **`install.cmd`**. That is
+the whole process — no administrator rights, no build tools, no command line.
+
+The installer copies the files into `%LOCALAPPDATA%\BrightnessControl`, registers
+a hidden logon launcher, starts the agent, and then waits until it has actually
+attached to the shell before telling you it worked. If it cannot attach, it says
+so instead of pretending.
+
+Press **Win+A** afterwards. The chevron appears at the right end of the brightness
+row, and stays there across reboots.
+
+To remove it, run **`uninstall.cmd`** from the same folder. The chevron lingers
+until the shell restarts, so sign out once after uninstalling.
+
+### Requirements
+
+- Windows 11. The hook resolves its targets from Microsoft's public PDB at load
+  time, so it survives most updates, but it has only been tested on the build
+  listed at the bottom.
+- A monitor with DDC/CI enabled in its own OSD menu. Most Dell/HP/LG panels ship
+  with it on.
+
+### If the chevron does not appear
+
+Open `%LOCALAPPDATA%\BrightnessControl\native.log`. It records whether the agent
+attached, whether the hook installed, and whether the chevron was built. If the
+symbol lookup failed, the log says so — that means the Windows build moved the
+function it hooks.
+
+## Build from source
+
+Only needed if you want to change the code. Requires Visual Studio Build Tools
+with the C++ workload (MSVC and the Windows SDK). `build.cmd` finds the toolchain
+with `vswhere` and calls `vcvars64`:
 
 ```
 native\build.cmd
 ```
 
-Output lands in `native\out\`: `bcdll.dll`, `bcinject.exe`, `bcsync.exe`.
-
-## Install
-
-Manual, per user:
-
-1. Copy the three files from `native\out\` to `%LOCALAPPDATA%\BrightnessControl\`.
-2. Start `bcsync.exe` — it stays resident and has no window.
-3. Run `bcinject.exe ShellHost.exe bcdll.dll` once the shell is up, for example
-   from a Startup entry.
-
-Windows restarts `ShellHost.exe` from time to time; re-running the injector
-re-arms the DLL in the new host. The log at
-`%LOCALAPPDATA%\BrightnessControl\native.log` records whether the hook installed.
+Output lands in `native\out\`. Put those three files next to `install.ps1` and run
+the installer, or copy them into `%LOCALAPPDATA%\BrightnessControl` yourself.
 
 ## Limitations
 
@@ -105,11 +127,13 @@ re-arms the DLL in the new host. The log at
 
 ```
 native/src/bcdll.cpp      the injected DLL: hooks, XAML tree, sliders
-native/src/injector.cpp   bcinject.exe
-native/src/bcsync.cpp     bcsync.exe, the DDC/CI writer
+native/src/bcsync.cpp     the resident agent: injects, self-heals, writes DDC/CI
+native/src/injector.cpp   bcinject.exe, the manual injector
 native/tools/             PDB symbol reader and RTTI probe used during discovery
 native/README.md          the long engineering log: what failed, and why
 docs/                     screenshots and the animation
+install.cmd / install.ps1       installs, autostarts, and verifies
+uninstall.cmd / uninstall.ps1   removes everything again
 ```
 
 `native/README.md` is worth reading before changing the hook. It records the wrong
