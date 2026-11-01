@@ -37,7 +37,7 @@ namespace BrightnessControl
 
         public const int CardWidth = 450;
         public const int CardHeight = 74;
-        public const int Gap = 3;
+        public const int Gap = 2;
 
         public QuickSettingsCard(string monitorName)
         {
@@ -116,6 +116,18 @@ namespace BrightnessControl
                 g.DrawLine(pen, 26.5f, 53f, 26.5f, 56f);
                 g.DrawLine(pen, 22f, 56.5f, 31f, 56.5f);
             }
+        }
+
+        /// <summary>Square on top (it tucks under the panel), rounded at the bottom.</summary>
+        private static GraphicsPath BottomRounded(Rectangle r, int radius)
+        {
+            GraphicsPath p = new GraphicsPath();
+            int d = radius * 2;
+            p.AddLine(r.X, r.Y, r.Right, r.Y);
+            p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
         }
 
         private static GraphicsPath Rounded(Rectangle r, int radius)
@@ -272,19 +284,6 @@ namespace BrightnessControl
             else { _candidate = bounds; _candidateCount = 1; }
             if (_candidateCount < 2) return;
 
-            if (_card.Visible && _ourBounds != Rectangle.Empty && bounds.Y >= _ourBounds.Top - 2)
-            {
-                // The panel grew under us (e.g. a media card appeared). Drop the card and
-                // re-measure from the bottom of the container on the next tick.
-                Log.Write("qs: overlap detected, re-measuring");
-                HideCard();
-                _ourBounds = Rectangle.Empty;
-                _candidate = Rectangle.Empty;
-                _candidateCount = 0;
-                _lastMeasure = 0;
-                return;
-            }
-
             if (bounds != _lastLogged) { Log.Write("qs: card measured " + bounds); _lastLogged = bounds; }
             _lastHwnd = hwnd;
             _lastBounds = bounds;
@@ -319,9 +318,13 @@ namespace BrightnessControl
 
                 // Walk down from inside the card; the first run of rows where both columns
                 // match is past the card's bottom edge.
+                int limit = container.Height;
+                if (skip != Rectangle.Empty && skip.Top > container.Top)
+                    limit = Math.Min(limit, skip.Top - container.Top - 1);
+
                 int blankRun = 0;
                 int bottom = -1;
-                for (int y = inset + 14; y < container.Height; y++)
+                for (int y = inset + 14; y < limit; y++)
                 {
                     Color a = inside.GetPixel(0, y);
                     Color b = outside.GetPixel(0, y);
