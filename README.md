@@ -1,94 +1,132 @@
 # brightness-control
 
-A small Windows tray app that drives an external monitor's brightness over DDC/CI, keeps it in step with the laptop panel, and shows a slider per display in one panel.
+Per-display brightness inside Windows 11 Quick Settings, over DDC/CI. No tray app,
+no overlay window, no polling.
 
-## The problem
+![Quick Settings with the chevron on the brightness row](docs/quick-settings.png)
 
-Windows 11 Quick Settings has exactly one brightness slider, and it only moves the built-in panel. External monitors support DDC/CI, but Windows only exposes that per-display inside *Settings → System → Display*, never in the tray panel — and the Fn brightness keys only ever touch the laptop screen.
+The chevron on the brightness row opens a sub-page with one slider per display,
+and a back arrow to return:
 
-So you end up with two brightness controls in two places, and one of them is three clicks deep.
-
-This app does two things about it:
-
-- **Mirrors the laptop panel onto every DDC/CI monitor.** The existing slider — and the Fn keys — now move both screens together.
-- **A tray panel** with one slider per display, for when you want to set them independently. It opens from the tray icon or `BrightnessControl.exe --show`, and can optionally take over Win+A (`intercept_wina=1`).
+![Brightness sub-page](docs/brightness-page.png)
 
 ## How it works
 
-| What | API |
-|---|---|
-| Internal panel, read + write | WMI `root\WMI` — `WmiMonitorBrightness` / `WmiMonitorBrightnessMethods.WmiSetBrightness` |
-| External monitor, read + write | DDC/CI via `dxva2.dll` — `GetPhysicalMonitorsFromHMONITOR`, `GetVCPFeatureAndVCPFeatureReply`, `SetVCPFeature`, VCP code `0x10` |
+![Animated walkthrough of the flow](docs/how-it-works.gif)
 
-All hardware access runs on one worker thread. The UI thread only posts target values into volatile fields — a DDC/CI write costs 30–100 ms and would otherwise stall slider drags.
+## Why it has to be an injected DLL
 
-Windows exposes no brightness-change event (`WmiMonitorBrightnessEvent` never fires on current builds), so the worker polls the internal panel every 400 ms and drops to 120 ms for 1.5 s after any change, which is enough to track a slider drag smoothly.
+Windows 11's Quick Settings panel is a XAML island inside `ShellHost.exe`. It has
+no enumerable window, no UI Automation provider, and it is composited in a higher
+band than any ordinary window — a topmost overlay can neither cover it nor draw
+on it. The only way to put a control *inside* that panel is to run code inside
+`ShellHost.exe` and edit the panel's own XAML tree.
 
-Win+A interception is opt-in and off by default. When enabled it uses a `WH_KEYBOARD_LL` hook: only the `A` is swallowed, and an unbound `F24` is injected between the Win down and up so the shell sees a combo rather than a bare Win tap and does not open Start. Modifier key-ups are never swallowed — doing that desyncs the OS modifier state and every later keystroke arrives as Win+key. A `WH_MOUSE_LL` hook closes the panel on the next click outside it.
+So this is not a skin or a clone of Quick Settings. It is the real panel, with a
+few elements added to it.
 
-## Requirements
+## What runs
 
-- Windows 10/11 — uses .NET Framework 4.x, which ships with Windows
-- The monitor must support DDC/CI **and** have it enabled in its OSD menu. Most Dell/HP/LG panels ship with it on; some ship with it off and report no brightness capability at all until you enable it.
+| Piece | Role | Size |
+|---|---|---|
+| `bcdll.dll` | Injected into `ShellHost.exe`. Hooks the flyout, adds the chevron and the Brightness sub-page, listens to the sliders. | 178 KB on disk |
+| `bcinject.exe` | Injects the DLL once and exits. | 158 KB, transient |
+| `bcsync.exe` | Resident DDC/CI writer. Sleeps on a named event and does nothing until signalled. | 5.9 MB working set |
+
+The C# tray app this replaced ran at ~37 MB.
+
+## The flow
+
+1. `bcinject.exe` injects `bcdll.dll` into `ShellHost.exe`.
+2. When Quick Settings opens, `ControlCenterView::OnGotFocus` fires. The hook
+   records the view pointer and posts the real work to the DispatcherQueue —
+   touching XAML from inside the hook itself takes the shell down.
+3. The deferred pass walks the XAML tree and finds the stock brightness slider
+   (`ControlCenter.AsyncSlider`, which implements `IRangeBase`) and `Grid#L1Grid`.
+4. It appends a chevron button to the brightness row and builds a Brightness
+   sub-page. Pressing the chevron collapses `L1Grid` and shows the sub-page; the
+   back arrow reverses it.
+5. Moving any slider raises `IRangeBase::ValueChanged`. The DLL writes the value
+   into a named shared page and signals a named event.
+6. `bcsync.exe` wakes, calls `SetVCPFeature(0x10)` over DDC/CI, and the external
+   panel changes brightness.
+
+The stock slider still mirrors onto the external panel, so the ordinary slider
+and the Fn brightness keys keep working as before. The sub-page is only for
+setting the two displays independently.
+
+## Why a second process for DDC/CI
+
+`GetPhysicalMonitorsFromHMONITOR` returns null handles for *every* monitor when
+called from inside `ShellHost.exe`, on any thread. The identical enumeration works
+from a normal process. So the VCP write lives in `bcsync.exe`; the DLL and the
+helper share a named page and a named event, and the helper stays asleep until
+there is something to write.
 
 ## Build
 
-No SDK required — the .NET Framework compiler is already on every Windows install:
+Needs Visual Studio Build Tools with the C++ workload (MSVC and the Windows SDK).
+`build.cmd` locates the toolchain with `vswhere` and calls `vcvars64`:
 
-```bat
-build.cmd
+```
+native\build.cmd
 ```
 
-which is just:
-
-```bat
-%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:winexe /optimize+ ^
-  /out:BrightnessControl.exe /r:System.dll /r:System.Management.dll ^
-  /r:System.Drawing.dll /r:System.Windows.Forms.dll src\*.cs
-```
+Output lands in `native\out\`: `bcdll.dll`, `bcinject.exe`, `bcsync.exe`.
 
 ## Install
 
-Copy `BrightnessControl.exe` anywhere and run it. To start it with Windows, tick **Start with Windows** in the tray menu (it writes a small `.vbs` launcher into `shell:startup`), or make your own shortcut.
+Manual, per user:
 
-Configuration lives in `%LOCALAPPDATA%\BrightnessControl\config.ini`:
+1. Copy the three files from `native\out\` to `%LOCALAPPDATA%\BrightnessControl\`.
+2. Start `bcsync.exe` — it stays resident and has no window.
+3. Run `bcinject.exe ShellHost.exe bcdll.dll` once the shell is up, for example
+   from a Startup entry.
 
-```ini
-# mirror the laptop panel brightness onto external DDC/CI monitors
-linked=1
-
-# Win+A opens this app's panel instead of the Windows Quick Settings
-intercept_wina=0
-```
-
-Leave `intercept_wina=0` to keep the native Quick Settings on Win+A; the panel stays reachable from the tray icon and from `BrightnessControl.exe --show`, which is handy for binding a different hotkey.
-
-## Source layout
-
-| File | Contents |
-|---|---|
-| `src/Display.cs` | WMI + DDC/CI interop, monitor enumeration, capability probing |
-| `src/Program.cs` | Tray app, worker loop, Win+A and mouse hooks, config |
-| `src/QuickPanel.cs` | The Win+A panel |
-| `src/Controls.cs` | Slider, toggle switch, footer link (custom drawn) |
-| `src/Hooks.cs` | Low-level keyboard/mouse hook host |
+Windows restarts `ShellHost.exe` from time to time; re-running the injector
+re-arms the DLL in the new host. The log at
+`%LOCALAPPDATA%\BrightnessControl\native.log` records whether the hook installed.
 
 ## Limitations
 
-- **There is no way to put a slider inside the Quick Settings card.** This was investigated properly, and the results are worth recording so nobody repeats it:
-  - The panel is `ControlCenterWindow`, owned by `ShellHost.exe`, created in a DWM compositor band. `EnumWindows`, `FindWindow` and `EnumThreadWindows` cannot see it at all; it can only be found with `WindowFromPoint` plus a class-name check.
-  - It exposes no UI Automation provider — `AutomationElement.FromHandle` returns an element with zero descendants — so its internal geometry has to be measured from pixels.
-  - `SetWindowBand` is refused with `ACCESS_DENIED` (5) for every band value, so a normal process cannot join or exceed that band.
-  - A window placed over the card renders *behind* it: the card's acrylic surface blends the window underneath rather than being covered by it. Anything drawn ends up dimmed behind the glass or below the card.
-  - That leaves DLL injection into `ShellHost.exe` and runtime XAML manipulation, which breaks on every feature update and is not worth running on a daily-driver machine. The native slider driving both monitors is the honest alternative.
-- Shell flyouts (the media card) render in a higher compositor band than an ordinary topmost window, so the tray panel re-asserts topmost every 500 ms while it is open.
-- DDC/CI calls fail transiently while a monitor wakes from sleep. Handles are re-enumerated on failure, but a change made in the first second after wake can be missed.
-- External brightness is mapped linearly onto the monitor's VCP range (0–100 on most panels).
-- Nothing here survives if the monitor's OSD has DDC/CI disabled — the app will simply find no external display to control.
+- Hook targets are RVAs resolved from Microsoft's public PDB at load time. A
+  Windows feature update can move them; if the log reports the symbol lookup
+  failing, that is why.
+- Quick Settings can host more than one `ControlCenterView`, and it rebuilds the
+  flyout's content between opens. The code walks every view it has seen and
+  re-finds elements by name rather than trusting a cached pointer.
+- Only the two displays on this machine were exercised: a laptop panel over WMI
+  and a Dell P2423D over DDC/CI. A monitor with DDC/CI disabled in its OSD will
+  not appear.
+- The chevron is drawn with `Segoe Fluent Icons`. The shell's own button uses an
+  `AnimatedIcon` (a Lottie asset), so the strokes are close but not identical.
+
+## Repo layout
+
+```
+native/src/bcdll.cpp      the injected DLL: hooks, XAML tree, sliders
+native/src/injector.cpp   bcinject.exe
+native/src/bcsync.cpp     bcsync.exe, the DDC/CI writer
+native/tools/             PDB symbol reader and RTTI probe used during discovery
+native/README.md          the long engineering log: what failed, and why
+docs/                     screenshots and the animation
+```
+
+`native/README.md` is worth reading before changing the hook. It records the wrong
+turns — RTTI, wrong vtable slots, a heap corruption that made DDC look impossible —
+so they don't have to be repeated.
 
 ## Verified on
 
-Windows 11 26H2 (build 26300) · Intel UHD Graphics + NVIDIA MX250 · Dell P2423D over HDMI · laptop panel via WMI. Idle cost is ~40 MB RAM, ~0.2 % of one core, and 2.5 wakeups/s (the worker blocks on an event and only polls the panel on a timer).
+Windows 11 (build 26300) · Intel UHD Graphics + NVIDIA MX250 · Dell P2423D over
+HDMI · laptop panel via WMI.
+
+## The old implementation
+
+An earlier C# WinForms tray app is preserved on the **`old-implementation`**
+branch. It works — it mirrors the panels and shows its own panel from the tray —
+but it is a ~37 MB process and its panel sits outside Quick Settings. This
+implementation replaces it.
 
 ## License
 
