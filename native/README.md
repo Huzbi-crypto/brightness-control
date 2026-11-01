@@ -30,10 +30,22 @@ two of its **virtual** functions (not exports):
 
 Both receive the implementation object, from which the XAML tree is reachable.
 The reference resolves these by decorated name through Windhawk's symbol
-server, which we do not have. The RTTI type descriptor for `ControlCenterView`
-is present in the DLL (offset `0x35B2F8`), so the plan is to find the vtable
-through RTTI and identify the two slots empirically - hook the candidates,
-open the panel, see which fire with that signature.
+server, which we do not have.
+
+**RTTI does not work here** (tried, `tools/rtti_probe.cpp`): the class has no
+RTTI type descriptor in the DLL, so there is no vtable to walk. The
+`ControlCenterView` string at `0x35B2F8` is a source path
+(`...\controlcenter\dll\ControlCenterView.cpp`), not a descriptor, and
+searching for the decorated form `.?AVControlCenterView` finds nothing - RTTI
+is simply not emitted for this component.
+
+So the route is symbols, the same way Windhawk does it:
+
+1. read the PE debug directory for the CodeView record (PDB GUID + age + name);
+2. fetch the PDB from `msdl.microsoft.com/download/symbols/<name>/<GUID><age>/`;
+3. resolve the two decorated names to RVAs with DbgHelp pointed at the local
+   PDB (no `symsrv` needed once the file is on disk);
+4. hook by patching the function prologue at that RVA.
 
 ## Layout
 
