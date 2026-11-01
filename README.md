@@ -85,18 +85,19 @@ until the shell restarts, so sign out once after uninstalling.
 
 ### Requirements
 
-- Windows 11. The hook resolves its targets from Microsoft's public PDB at load
-  time, so it survives most updates, but it has only been tested on the build
-  listed at the bottom.
+- Windows 11. Only the build listed at the bottom has been tested. The hook
+  patches one hardcoded address and checks the function's prologue first, so a
+  Windows update that moves it disables the chevron rather than breaking the
+  shell. See the last section of Limitations.
 - A monitor with DDC/CI enabled in its own OSD menu. Most Dell/HP/LG panels ship
   with it on.
 
 ### If the chevron does not appear
 
 Open `%LOCALAPPDATA%\BrightnessControl\native.log`. It records whether the agent
-attached, whether the hook installed, and whether the chevron was built. If the
-symbol lookup failed, the log says so — that means the Windows build moved the
-function it hooks.
+attached, whether the hook installed, and whether the chevron was built. If it
+says `prologue mismatch`, Windows moved the hooked function — that needs a
+rebuild, not a reinstall.
 
 ## Build from source
 
@@ -113,9 +114,13 @@ the installer, or copy them into `%LOCALAPPDATA%\BrightnessControl` yourself.
 
 ## Limitations
 
-- Hook targets are RVAs resolved from Microsoft's public PDB at load time. A
-  Windows feature update can move them; if the log reports the symbol lookup
-  failing, that is why.
+- **The hook address is baked in.** `ControlCenterView::OnGotFocus` is patched at
+  RVA `0xC0950`, read once from a specific `ControlCenter.pdb` with
+  `native/tools/symtool`. A Windows update that moves that function will break the
+  hook. It fails safe rather than crashing: the DLL checks the function's prologue
+  bytes before patching and refuses if they don't match, so the worst case is a
+  missing chevron, not a dead shell. Recovering means re-running `symtool` against
+  the new `ControlCenter.dll` and rebuilding.
 - Quick Settings can host more than one `ControlCenterView`, and it rebuilds the
   flyout's content between opens. The code walks every view it has seen and
   re-finds elements by name rather than trusting a cached pointer.

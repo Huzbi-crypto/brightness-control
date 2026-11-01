@@ -2495,6 +2495,16 @@ static DWORD WINAPI InitThread(LPVOID module)
         return 0;
     }
 
+    // The RVA above is baked in from one specific ControlCenter.pdb. If a Windows
+    // update moved that function, patching this address would corrupt whatever is
+    // there now and take the shell down with it. So the prologue has to be exactly
+    // what we expect, or we leave the shell alone.
+    static const BYTE kPrologue[6] = { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x40 };
+    if (memcmp(target, kPrologue, sizeof(kPrologue)) != 0) {
+        Log(L"OnGotFocus: prologue mismatch - this Windows build moved the function; not patching");
+        return 0;
+    }
+
     // 6, not 5: the prologue is `40 53` (push rbx, two bytes - 0x40 is a REX
     // prefix) followed by `48 83 EC 40` (sub rsp,0x40, four bytes). Stealing 5
     // splits the sub in half, the trampoline runs it with the wrong immediate,
