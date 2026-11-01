@@ -39,13 +39,36 @@ RTTI type descriptor in the DLL, so there is no vtable to walk. The
 searching for the decorated form `.?AVControlCenterView` finds nothing - RTTI
 is simply not emitted for this component.
 
-So the route is symbols, the same way Windhawk does it:
+So the route is symbols, the same way Windhawk does it - and it works
+(`tools/symtool.cpp`):
 
-1. read the PE debug directory for the CodeView record (PDB GUID + age + name);
-2. fetch the PDB from `msdl.microsoft.com/download/symbols/<name>/<GUID><age>/`;
-3. resolve the two decorated names to RVAs with DbgHelp pointed at the local
-   PDB (no `symsrv` needed once the file is on disk);
-4. hook by patching the function prologue at that RVA.
+```
+PDB   : ControlCenter.pdb
+GUID  : 69549732A6CF1C43FDF7ED1FD2227E421 (age 1)
+```
+
+Both names resolve, and the addresses are confirmed independently: with the
+per-monitor-brightness mod enabled, both functions already start with
+`E9 .. .. .. ..` (a 5-byte jump) plus `CC` padding, which is Windhawk's own
+detour sitting on exactly these RVAs.
+
+| Target | RVA | Original prologue |
+|---|---|---|
+| `ControlCenterView::OnGotFocus` | `0xC0950` | `40 53` push rbx; `48 83 EC 40` sub rsp,40; `48 8B 05 E3 36 2F 00` mov rax,[rip+2F36E3]; `48 33 C4` xor rax,rsp |
+| `ControlCenterView::Connect` | `0xA5490` | `48 83 EC 48` sub rsp,48; `48 8B 05 A5 EB 30 00` mov rax,[rip+30EBA5]; `48 33 C4` xor rax,rsp |
+
+Notes that shape the detour:
+
+- `OnGotFocus` gives a clean 5-byte steal (`push rbx` + `sub rsp,0x40`), so a
+  plain `E9 rel32` patch needs no relocation.
+- `Connect` starts with a 4-byte `sub rsp,0x48`, so 5 bytes is not an
+  instruction boundary; it needs an 11-byte steal that includes the
+  RIP-relative stack-cookie load. That one instruction has to be relocated
+  (`disp32 -= trampoline_addr - original_addr`); everything else in the stolen
+  span is position independent.
+- `Connect` is ICF-folded with the `Connect` of several other classes in the
+  same DLL (same address), so the hook must decide whether the object is a
+  ControlCenterView instead of trusting the address.
 
 ## Layout
 

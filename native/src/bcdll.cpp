@@ -47,9 +47,23 @@ static DWORD WINAPI InitThread(LPVOID module)
     Log(L"ControlCenter.dll %s (0x%p)",
         controlCenter ? L"already mapped" : L"not mapped yet", controlCenter);
 
-    HMODULE user32 = GetModuleHandleW(L"user32.dll");
-    Log(L"user32=0x%p LoadLibraryW=0x%p",
-        user32, GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW"));
+    // The two hook targets, resolved from ControlCenter.pdb (GUID
+    // 69549732A6CF1C43FDF7ED1FD2227E421, age 1) off Microsoft's symbol server.
+    // Connect is ICF-folded with the Connect of other classes in this DLL, so a
+    // hook there has to identify the object rather than trust the address.
+    if (controlCenter) {
+        const struct { const wchar_t* name; DWORD rva; } targets[] = {
+            { L"ControlCenterView::OnGotFocus", 0x000C0950 },
+            { L"ControlCenterView::Connect",    0x000A5490 },
+        };
+        for (const auto& t : targets) {
+            const BYTE* fn = reinterpret_cast<const BYTE*>(controlCenter) + t.rva;
+            Log(L"%s rva=0x%X va=0x%p bytes=%02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+                t.name, t.rva, fn,
+                fn[0], fn[1], fn[2], fn[3], fn[4], fn[5],
+                fn[6], fn[7], fn[8], fn[9], fn[10], fn[11]);
+        }
+    }
 
     return 0;
 }
