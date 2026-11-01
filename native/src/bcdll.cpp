@@ -156,6 +156,7 @@ struct IInspectableABI : IUnknown
 struct IContentControlABI : IInspectableABI
 {
     virtual HRESULT STDMETHODCALLTYPE get_Content(IInspectableABI** value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE put_Content(IInspectableABI* value) = 0;
 };
 
 // a50a4bbd-8361-469c-90da-e9a40c7474df
@@ -236,6 +237,10 @@ struct IFrameworkElementABI : IInspectableABI
     virtual void* unused6();
     virtual HRESULT STDMETHODCALLTYPE get_ActualWidth(double* value) = 0;
     virtual HRESULT STDMETHODCALLTYPE get_ActualHeight(double* value) = 0;
+    virtual void* unused7();                                        // slot 15 get_Width
+    virtual HRESULT STDMETHODCALLTYPE put_Width(double value) = 0;   // slot 16
+    virtual void* unused8();                                        // slot 17 get_Height
+    virtual HRESULT STDMETHODCALLTYPE put_Height(double value) = 0;  // slot 18
 };
 
 static const IID kIActivationFactory = { 0x00000035, 0, 0, { 0xC0, 0, 0, 0, 0, 0, 0, 0x46 } };
@@ -243,6 +248,58 @@ static const IID kIVisualTreeHelperStatics = { 0xe75758c4, 0xd25d, 0x4b1d, { 0x9
 static const IID kIFrameworkElement = { 0xa391d09b, 0x4a99, 0x4b7c, { 0x9d, 0x8d, 0x6f, 0xa5, 0xd0, 0x1f, 0x6f, 0xbf } };
 static const IID kIDependencyObject = { 0x5c526665, 0xf60e, 0x4912, { 0xaf, 0x59, 0x5f, 0xe0, 0x68, 0x0f, 0x08, 0x9d } };
 
+
+// fd104460-2e15-4ba3-8b8f-fa693a4161e9 - only the two definition vectors.
+struct IGridABI : IInspectableABI
+{
+    virtual HRESULT STDMETHODCALLTYPE get_RowDefinitions(IInspectableABI** value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_ColumnDefinitions(IInspectableABI** value) = 0;
+};
+
+// 4abae829-d80c-4a5e-a48c-f8b3d3b6533d
+struct GridLengthABI
+{
+    double value;
+    int type;   // GridUnitType: Auto 0, Pixel 1, Star 2
+    int pad;
+};
+
+struct IRowDefinitionABI : IInspectableABI
+{
+    virtual HRESULT STDMETHODCALLTYPE get_Height(GridLengthABI* value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE put_Height(GridLengthABI value) = 0;
+};
+
+// 64fe2e9f-f951-42b6-a9ce-bb179af11595 - SetRow is method 2.
+struct IGridStaticsABI : IInspectableABI
+{
+    virtual HRESULT STDMETHODCALLTYPE get_RowProperty(IDependencyObjectABI** value) = 0;
+    virtual void* unused1();                                       // slot 7 GetRow
+    virtual HRESULT STDMETHODCALLTYPE SetRow(IInspectableABI* element, int value) = 0;
+};
+
+// IDependencyObject::SetValue is slot 7.
+struct IDependencyObjectSetValueABI : IInspectableABI
+{
+    virtual void* unusedGetValue();                                // slot 6
+    virtual HRESULT STDMETHODCALLTYPE SetValue(IDependencyObjectABI* dp, IInspectableABI* value) = 0;
+};
+
+// 629bdbc8-d932-4ff4-96b9-8d96c5c1e858 - CreateInt32 is method 4.
+struct IPropertyValueStaticsABI : IInspectableABI
+{
+    virtual void* unused0();
+    virtual void* unused1();
+    virtual void* unused2();
+    virtual void* unused3();
+    virtual HRESULT STDMETHODCALLTYPE CreateInt32(int value, IInspectableABI** result) = 0;
+};
+
+static const IID kIPropertyValueStatics = { 0x629bdbc8, 0xd932, 0x4ff4, { 0x96, 0xb9, 0x8d, 0x96, 0xc5, 0xc1, 0xe8, 0x58 } };
+
+static const IID kIGrid = { 0xfd104460, 0x2e15, 0x4ba3, { 0x8b, 0x8f, 0xfa, 0x69, 0x3a, 0x41, 0x61, 0xe9 } };
+static const IID kIRowDefinition = { 0x4abae829, 0xd80c, 0x4a5e, { 0xa4, 0x8c, 0xf8, 0xb3, 0xd3, 0xb6, 0x53, 0x3d } };
+static const IID kIGridStatics = { 0x64fe2e9f, 0xf951, 0x42b6, { 0xa9, 0xce, 0xbb, 0x17, 0x9a, 0xf1, 0x15, 0x95 } };
 
 static IVisualTreeHelperStaticsABI* GetVisualTreeHelper()
 {
@@ -361,61 +418,185 @@ static void WalkTree(IVisualTreeHelperStaticsABI* helper, IDependencyObjectABI* 
 }
 
 static IDependencyObjectABI* g_itemsPanel = nullptr;
+static IDependencyObjectABI* g_slidersGroup = nullptr;
+static IDependencyObjectABI* g_l1Grid = nullptr;
 
-// Appends one real XAML element to the sliders list, to prove insertion works
-// before building the actual brightness row.
-static void InsertTestSlider()
+static IInspectableABI* Activate(const wchar_t* className)
 {
-    if (!g_itemsPanel) {
-        Log(L"insert: no ItemsStackPanel captured");
-        return;
-    }
-
-    IPanelABI* panel = nullptr;
-    HRESULT hr = reinterpret_cast<IInspectableABI*>(g_itemsPanel)->QueryInterface(
-        kIPanel, reinterpret_cast<void**>(&panel));
-    Log(L"insert: QI IPanel 0x%08X", hr);
-    if (FAILED(hr) || !panel)
-        return;
-
-    IInspectableABI* childrenRaw = nullptr;
-    hr = panel->get_Children(&childrenRaw);
-    Log(L"insert: get_Children 0x%08X", hr);
-    if (FAILED(hr) || !childrenRaw) {
-        panel->Release();
-        return;
-    }
-
-    // get_Children hands back IVector<UIElement> already, so cast it rather than
-    // QI for IInspectable - that would give a different vtable.
-    IVectorABI* children = reinterpret_cast<IVectorABI*>(childrenRaw);
-
-    unsigned before = 0;
-    children->get_Size(&before);
-
-    const wchar_t* className = L"Windows.UI.Xaml.Controls.Slider";
     HSTRING name = nullptr;
-    g_createString(className, static_cast<UINT32>(wcslen(className)), &name);
+    if (FAILED(g_createString(className, static_cast<UINT32>(wcslen(className)), &name)) || !name)
+        return nullptr;
     void* instance = nullptr;
-    hr = g_roActivateInstance(name, &instance);
+    HRESULT hr = g_roActivateInstance(name, &instance);
     g_deleteString(name);
-    Log(L"insert: RoActivateInstance 0x%08X", hr);
     if (FAILED(hr) || !instance) {
-        childrenRaw->Release();
-        panel->Release();
+        Log(L"activate %s: 0x%08X", className, hr);
+        return nullptr;
+    }
+    return reinterpret_cast<IInspectableABI*>(instance);
+}
+
+// Adds a row to L1Grid and puts the panel in it, which is how the shell lays out
+// its own sections. Appending into the virtualizing sliders panel does not
+// survive a layout pass, and re-parenting the GridView is refused outright.
+static void InsertPanelIntoGrid()
+{
+    if (!g_l1Grid) {
+        Log(L"insert: no L1Grid captured");
         return;
     }
 
-    hr = children->Append(reinterpret_cast<IInspectableABI*>(instance));
-    Log(L"insert: Append 0x%08X", hr);
+    IGridABI* grid = nullptr;
+    HRESULT hr = reinterpret_cast<IInspectableABI*>(g_l1Grid)->QueryInterface(
+        kIGrid, reinterpret_cast<void**>(&grid));
+    Log(L"insert: QI IGrid 0x%08X", hr);
+    if (FAILED(hr) || !grid)
+        return;
 
-    unsigned after = 0;
-    children->get_Size(&after);
-    Log(L"insert: children %u -> %u", before, after);
+    IInspectableABI* rowsRaw = nullptr;
+    hr = grid->get_RowDefinitions(&rowsRaw);
+    Log(L"insert: get_RowDefinitions 0x%08X", hr);
+    if (FAILED(hr) || !rowsRaw) {
+        grid->Release();
+        return;
+    }
+    IVectorABI* rows = reinterpret_cast<IVectorABI*>(rowsRaw);
 
-    reinterpret_cast<IInspectableABI*>(instance)->Release();
-    childrenRaw->Release();
+    unsigned rowCount = 0;
+    rows->get_Size(&rowCount);
+    Log(L"insert: L1Grid has %u row(s)", rowCount);
+
+    // Appending a row to a grid that declares none re-flows every existing child
+    // out of the implicit row 0, so refuse rather than wreck the panel.
+    if (rowCount == 0) {
+        Log(L"insert: no RowDefinitions - refusing to re-flow");
+        rowsRaw->Release();
+        grid->Release();
+        return;
+    }
+
+    IInspectableABI* rowDefinition = Activate(L"Windows.UI.Xaml.Controls.RowDefinition");
+    if (!rowDefinition) {
+        rowsRaw->Release();
+        grid->Release();
+        return;
+    }
+
+    IRowDefinitionABI* row = nullptr;
+    hr = rowDefinition->QueryInterface(kIRowDefinition, reinterpret_cast<void**>(&row));
+    Log(L"insert: QI IRowDefinition 0x%08X", hr);
+    if (SUCCEEDED(hr) && row) {
+        GridLengthABI autoHeight = { 0.0, 0, 0 };  // GridUnitType::Auto
+        hr = row->put_Height(autoHeight);
+        Log(L"insert: put_Height(Auto) 0x%08X", hr);
+        row->Release();
+    }
+
+    hr = rows->Append(rowDefinition);
+    Log(L"insert: append RowDefinition 0x%08X", hr);
+    rowDefinition->Release();
+
+    unsigned newRow = rowCount;
+
+    IInspectableABI* panel = Activate(L"Windows.UI.Xaml.Controls.StackPanel");
+    if (!panel) {
+        rowsRaw->Release();
+        grid->Release();
+        return;
+    }
+
+    IInspectableABI* slider = Activate(L"Windows.UI.Xaml.Controls.Slider");
+    if (slider) {
+        IFrameworkElementABI* element = nullptr;
+        if (SUCCEEDED(slider->QueryInterface(kIFrameworkElement, reinterpret_cast<void**>(&element))) && element) {
+            element->put_Width(332);
+            element->put_Height(44);
+            element->Release();
+        }
+
+        IPanelABI* panelInterface = nullptr;
+        if (SUCCEEDED(panel->QueryInterface(kIPanel, reinterpret_cast<void**>(&panelInterface))) && panelInterface) {
+            IInspectableABI* panelChildren = nullptr;
+            if (SUCCEEDED(panelInterface->get_Children(&panelChildren)) && panelChildren) {
+                hr = reinterpret_cast<IVectorABI*>(panelChildren)->Append(slider);
+                Log(L"insert: append Slider to panel 0x%08X", hr);
+                panelChildren->Release();
+            }
+            panelInterface->Release();
+        }
+        slider->Release();
+    }
+
+    // Grid.SetRow faults when called through the static interface, so set the
+    // same attached property directly: Grid.RowProperty + a boxed Int32.
+    HSTRING gridName = nullptr;
+    const wchar_t* gridClass = L"Windows.UI.Xaml.Controls.Grid";
+    g_createString(gridClass, static_cast<UINT32>(wcslen(gridClass)), &gridName);
+    void* gridFactory = nullptr;
+    HRESULT hrFactory = g_roGetActivationFactory(gridName, kIActivationFactory, &gridFactory);
+    g_deleteString(gridName);
+
+    if (SUCCEEDED(hrFactory) && gridFactory) {
+        IGridStaticsABI* statics = nullptr;
+        HRESULT hrStatics = reinterpret_cast<IInspectableABI*>(gridFactory)->QueryInterface(
+            kIGridStatics, reinterpret_cast<void**>(&statics));
+        if (SUCCEEDED(hrStatics) && statics) {
+            IDependencyObjectABI* rowProperty = nullptr;
+            HRESULT hrProp = statics->get_RowProperty(&rowProperty);
+            Log(L"insert: get_RowProperty 0x%08X", hrProp);
+
+            HSTRING pvName = nullptr;
+            const wchar_t* pvClass = L"Windows.Foundation.PropertyValue";
+            g_createString(pvClass, static_cast<UINT32>(wcslen(pvClass)), &pvName);
+            void* pvFactory = nullptr;
+            HRESULT hrPv = g_roGetActivationFactory(pvName, kIActivationFactory, &pvFactory);
+            g_deleteString(pvName);
+
+            if (SUCCEEDED(hrPv) && pvFactory) {
+                IPropertyValueStaticsABI* pv = nullptr;
+                HRESULT hrPvQI = reinterpret_cast<IInspectableABI*>(pvFactory)->QueryInterface(
+                    kIPropertyValueStatics, reinterpret_cast<void**>(&pv));
+                if (SUCCEEDED(hrPvQI) && pv) {
+                    IInspectableABI* boxed = nullptr;
+                    HRESULT hrBox = pv->CreateInt32(static_cast<int>(newRow), &boxed);
+                    Log(L"insert: CreateInt32(%u) 0x%08X", newRow, hrBox);
+                    if (SUCCEEDED(hrBox) && boxed) {
+                        HRESULT hrSet = reinterpret_cast<IDependencyObjectSetValueABI*>(panel)
+                                            ->SetValue(rowProperty, boxed);
+                        Log(L"insert: SetValue(Grid.Row, %u) 0x%08X", newRow, hrSet);
+                        boxed->Release();
+                    }
+                    pv->Release();
+                }
+                reinterpret_cast<IInspectableABI*>(pvFactory)->Release();
+            }
+            if (rowProperty)
+                rowProperty->Release();
+            statics->Release();
+        }
+        reinterpret_cast<IInspectableABI*>(gridFactory)->Release();
+    }
+
+    IPanelABI* gridPanel = nullptr;
+    if (SUCCEEDED(reinterpret_cast<IInspectableABI*>(g_l1Grid)->QueryInterface(
+            kIPanel, reinterpret_cast<void**>(&gridPanel))) && gridPanel) {
+        IInspectableABI* gridChildren = nullptr;
+        if (SUCCEEDED(gridPanel->get_Children(&gridChildren)) && gridChildren) {
+            IVectorABI* children = reinterpret_cast<IVectorABI*>(gridChildren);
+            unsigned before = 0, after = 0;
+            children->get_Size(&before);
+            hr = children->Append(panel);
+            Log(L"insert: append panel to L1Grid 0x%08X", hr);
+            children->get_Size(&after);
+            Log(L"insert: L1Grid children %u -> %u", before, after);
+            gridChildren->Release();
+        }
+        gridPanel->Release();
+    }
+
     panel->Release();
+    rowsRaw->Release();
+    grid->Release();
 }
 
 // Depth-first search for Slider elements, logging the chain that leads to them.
@@ -441,12 +622,22 @@ static void SearchSliders(IVisualTreeHelperStaticsABI* helper, IDependencyObject
         wchar_t elementName[128] = {};
         GetElementName(child, elementName, 128);
 
+        if (wcscmp(elementName, L"L1Grid") == 0 && !g_l1Grid) {
+            child->AddRef();
+            g_l1Grid = child;
+            Log(L"captured L1Grid: %s %.0fx%.0f", className, width, height);
+        }
+
         if (wcsstr(className, L"ItemsStackPanel") && !g_itemsPanel) {
             child->AddRef();
             g_itemsPanel = child;
             Log(L"captured ItemsStackPanel: %.0fx%.0f", width, height);
         }
 
+        if (wcscmp(elementName, L"SlidersGroup") == 0 && !g_slidersGroup) {
+            child->AddRef();
+            g_slidersGroup = child;
+        }
         if (wcscmp(elementName, L"SlidersGroup") == 0) {
             Log(L"FOUND SlidersGroup at depth %d: %s %.0fx%.0f", depth, className, width, height);
             Log(L"--- SlidersGroup subtree ---");
@@ -519,7 +710,7 @@ static void InspectView(void* self)
     SearchSliders(helper, node, 0, &hits);
     Log(L"slider hits: %d", hits);
 
-    InsertTestSlider();
+    InsertPanelIntoGrid();
 
     node->Release();
     root->Release();

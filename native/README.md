@@ -224,3 +224,29 @@ next layout pass and drops a raw child from the virtualizing `ItemsStackPanel`.
 The row needs to be built as a real `GridViewItem` with an explicit size and
 inserted through the item source, or added as a sibling of the `GridView`
 inside a panel the shell does not virtualize.
+
+## Insertion works, placement does not
+
+A panel appended to `L1Grid` renders inside the Quick Settings flyout - visible
+above the toggle tiles, which is row 0. No crash:
+
+```
+insert: append panel to L1Grid 0x00000000
+insert: L1Grid children 4 -> 5
+```
+
+`L1Grid` is the 358x386 Grid under the view and reports 3 RowDefinitions, so a
+fourth Auto row is appended before the panel goes in. Getting the panel *into*
+that fourth row is the open problem:
+
+| Attempt | Result |
+|---|---|
+| `IGridStatics::SetRow(panel, 3)` | faults the process; the factory and `QI IGridStatics` both return S_OK first, and slot 8 matches the header |
+| `SetValue(Grid.RowProperty, boxed Int32 3)` | returns `0x00000313`, no crash, row unchanged |
+| append without any row set | renders in row 0, above the toggles |
+
+So the remaining work is purely placement. Either find why `SetRow` faults
+(the static interface may not be callable from an injected DLL the way an
+instance interface is), or get the appended row to actually take space - the
+grid is 358x386 and rows 0..2 already fill it, so a fourth Auto row may simply
+be measuring to zero and letting the child overflow at the top.
