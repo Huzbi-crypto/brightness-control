@@ -247,6 +247,8 @@ struct IVisualTreeHelperStaticsABI : IInspectableABI
 
 // a391d09b-4a99-4b7c-9d8d-6fa5d01f6fbf — ActualWidth/ActualHeight are methods
 // 7 and 8, i.e. vtable slots 13 and 14.
+struct ThicknessABI { double Left, Top, Right, Bottom; };
+
 struct IFrameworkElementABI : IInspectableABI
 {
     virtual void* unused0();
@@ -268,6 +270,8 @@ struct IFrameworkElementABI : IInspectableABI
     virtual HRESULT STDMETHODCALLTYPE put_HorizontalAlignment(int value) = 0;  // slot 28
     virtual void* a9();                                              // slot 29 get_VerticalAlignment
     virtual HRESULT STDMETHODCALLTYPE put_VerticalAlignment(int value) = 0;  // slot 30
+    virtual void* a10();                                             // slot 31 get_Margin
+    virtual HRESULT STDMETHODCALLTYPE put_Margin(ThicknessABI value) = 0;    // slot 32
 };
 
 static const IID kIActivationFactory = { 0x00000035, 0, 0, { 0xC0, 0, 0, 0, 0, 0, 0, 0x46 } };
@@ -620,7 +624,6 @@ static IInspectableABI* Activate(const wchar_t* className)
 
 // ae2d9271-3b4a-45fc-8468-f7949548f4d5 - put_Text is method 21.
 struct FontWeightABI { UINT16 Weight; };
-struct ThicknessABI { double Left, Top, Right, Bottom; };
 
 struct ITextBlockABI : IInspectableABI
 {
@@ -902,6 +905,10 @@ static void BuildChevron()
                 ThicknessABI noPadding = { 0, 0, 0, 0 };
                 HRESULT hrPad = control->put_Padding(noPadding);
                 Log(L"chevron: put_Padding 0x%08X", hrPad);
+                // The shell's button has no visible outline; a transparent brush
+                // removes ours without changing the hit-testing background.
+                HRESULT hrBorder = control->put_BorderBrush(clear);
+                Log(L"chevron: put_BorderBrush 0x%08X", hrBorder);
                 control->Release();
             }
             clear->Release();
@@ -2108,6 +2115,69 @@ static IInspectableABI* MakeIconButton(const wchar_t* glyph, void* handler)
     return button;
 }
 
+// A horizontal row of [icon] [label], the way the sound sub-page pairs its
+// speaker glyph with the device name.
+static IInspectableABI* MakeIconLabel(const wchar_t* glyph, const wchar_t* text)
+{
+    IInspectableABI* row = Activate(L"Windows.UI.Xaml.Controls.StackPanel");
+    if (!row)
+        return nullptr;
+
+    IStackPanelABI* stack = nullptr;
+    if (SUCCEEDED(row->QueryInterface(kIStackPanel, reinterpret_cast<void**>(&stack))) && stack) {
+        stack->put_Orientation(1);  // Horizontal
+        stack->Release();
+    }
+
+    IFrameworkElementABI* element = nullptr;
+    if (SUCCEEDED(row->QueryInterface(kIFrameworkElement, reinterpret_cast<void**>(&element))) && element) {
+        element->put_VerticalAlignment(1);  // Centre
+        element->Release();
+    }
+
+    if (IInspectableABI* icon = MakeGlyph(glyph, 14, 255)) {
+        AppendChild(row, icon);
+        icon->Release();
+    }
+
+    if (IInspectableABI* label = MakeLabel(text)) {
+        IFrameworkElementABI* labelElement = nullptr;
+        if (SUCCEEDED(label->QueryInterface(kIFrameworkElement, reinterpret_cast<void**>(&labelElement))) && labelElement) {
+            ThicknessABI gap = { 8, 0, 0, 0 };
+            labelElement->put_Margin(gap);
+            labelElement->put_VerticalAlignment(1);  // Centre
+            labelElement->Release();
+        }
+        AppendChild(row, label);
+        label->Release();
+    }
+    return row;
+}
+
+// One display: its icon and name, then its slider.
+static void AddMonitorRow(IInspectableABI* page, const wchar_t* name, double value, int monitor)
+{
+    if (IInspectableABI* row = MakeIconLabel(L"\xE706", name)) {  // Brightness
+        IFrameworkElementABI* rowElement = nullptr;
+        if (SUCCEEDED(row->QueryInterface(kIFrameworkElement, reinterpret_cast<void**>(&rowElement))) && rowElement) {
+            ThicknessABI gap = { 0, 16, 0, 4 };
+            rowElement->put_Margin(gap);
+            rowElement->Release();
+        }
+        AppendChild(page, row);
+        row->Release();
+    }
+
+    if (IInspectableABI* slider = MakeSlider(value, monitor)) {
+        AppendChild(page, slider);
+        if (!g_panelSliders[monitor]) {
+            g_panelSliders[monitor] = slider;
+            slider->AddRef();
+        }
+        slider->Release();
+    }
+}
+
 static IInspectableABI* BuildBrightnessSubPage()
 {
     IInspectableABI* page = Activate(L"Windows.UI.Xaml.Controls.StackPanel");
@@ -2117,14 +2187,39 @@ static IInspectableABI* BuildBrightnessSubPage()
     }
     SetElementName(page, L"BCBrightnessPage");
 
-    // Header: back arrow, then the title, matching the shell's sub-pages.
-    if (IInspectableABI* back = MakeIconButton(L"\xE72B", &g_backHandler)) {  // Back
-        AppendChild(page, back);
-        back->Release();
+    // Breathing room at the top: the header was sitting against the panel edge.
+    IFrameworkElementABI* pageElement = nullptr;
+    if (SUCCEEDED(page->QueryInterface(kIFrameworkElement, reinterpret_cast<void**>(&pageElement))) && pageElement) {
+        ThicknessABI topGap = { 0, 12, 0, 0 };
+        pageElement->put_Margin(topGap);
+        pageElement->Release();
     }
-    if (IInspectableABI* title = MakeLabel(L"Brightness")) {
-        AppendChild(page, title);
-        title->Release();
+
+    // Header: back arrow and title side by side, as the shell's sub-pages have them.
+    IInspectableABI* header = Activate(L"Windows.UI.Xaml.Controls.StackPanel");
+    if (header) {
+        IStackPanelABI* headerStack = nullptr;
+        if (SUCCEEDED(header->QueryInterface(kIStackPanel, reinterpret_cast<void**>(&headerStack))) && headerStack) {
+            headerStack->put_Orientation(1);  // Horizontal
+            headerStack->Release();
+        }
+        IFrameworkElementABI* headerElement = nullptr;
+        if (SUCCEEDED(header->QueryInterface(kIFrameworkElement, reinterpret_cast<void**>(&headerElement))) && headerElement) {
+            headerElement->put_VerticalAlignment(1);  // Centre
+            ThicknessABI headerGap = { 0, 0, 0, 8 };
+            headerElement->put_Margin(headerGap);
+            headerElement->Release();
+        }
+        if (IInspectableABI* back = MakeIconButton(L"\xE72B", &g_backHandler)) {  // Back
+            AppendChild(header, back);
+            back->Release();
+        }
+        if (IInspectableABI* title = MakeLabel(L"Brightness")) {
+            AppendChild(header, title);
+            title->Release();
+        }
+        AppendChild(page, header);
+        header->Release();
     }
 
     double internalLevel = 0;
@@ -2140,34 +2235,16 @@ static IInspectableABI* BuildBrightnessSubPage()
     g_panelHandlers[0].monitor = 0;
     g_panelHandlers[1].monitor = 1;
 
-    if (IInspectableABI* label = MakeLabel(L"This display")) {
-        AppendChild(page, label);
-        label->Release();
-    }
-    if (IInspectableABI* slider = MakeSlider(internalLevel, 0)) {
-        AppendChild(page, slider);
-        if (!g_panelSliders[0]) {
-            g_panelSliders[0] = slider;
-            slider->AddRef();
-        }
-        slider->Release();
-    }
-    if (IInspectableABI* label = MakeLabel(L"Dell P2423D")) {
-        AppendChild(page, label);
-        label->Release();
-    }
-    if (IInspectableABI* slider = MakeSlider(internalLevel, 1)) {
-        AppendChild(page, slider);
-        if (!g_panelSliders[1]) {
-            g_panelSliders[1] = slider;
-            slider->AddRef();
-        }
-        slider->Release();
-    }
+    // "Built-in display" rather than "This display": the laptop panel reports an
+    // empty EDID friendly name (LGD0563), so there is no model name to show and
+    // this is the label Windows itself uses for the internal panel.
+    AddMonitorRow(page, L"Built-in display", internalLevel, 0);
+    AddMonitorRow(page, L"Dell P2423D", internalLevel, 1);
 
     Log(L"nav: sub-page built");
     return page;
 }
+
 
 static void NavigateToBrightness()
 {
