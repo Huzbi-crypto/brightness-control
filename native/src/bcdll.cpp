@@ -1473,27 +1473,35 @@ static void DoDeferredInspect()
             live = FindByName(finder, viewObject, kPanelName, 0);
         }
 
-        int collapsed = 0;
+        // Reset to the main page: the flyout is rebuilt on open, so the
+        // sub-page (if the shell kept it) goes away and L1Grid comes back.
+        int reset = 0;
         for (int v = 0; v < g_viewCount; ++v) {
             IDependencyObjectABI* root = nullptr;
-            if (SUCCEEDED(reinterpret_cast<IInspectableABI*>(g_views[v])->QueryInterface(
-                    kIDependencyObject, reinterpret_cast<void**>(&root))) && root) {
-                collapsed += CollapseAllByName(finder, root, kPanelName, 0);
-                root->Release();
-            }
-        }
+            if (FAILED(reinterpret_cast<IInspectableABI*>(g_views[v])->QueryInterface(
+                    kIDependencyObject, reinterpret_cast<void**>(&root))) || !root)
+                continue;
 
-        if (collapsed > 0) {
-            Log(L"panel: collapsed %d instance(s) on open", collapsed);
-            g_panelVisible = false;
-        } else if (g_monitorPanel) {
-            Log(L"panel: gone from the tree - dropping the stale reference");
-            g_monitorPanel->Release();
-            g_monitorPanel = nullptr;
-            g_panelVisible = false;
-        } else {
-            Log(L"panel: nothing to collapse");
+            if (IDependencyObjectABI* sub = FindByName(finder, root, L"BCBrightnessPage", 0)) {
+                SetVisibility(sub, 1);
+                sub->Release();
+                ++reset;
+            }
+            if (IDependencyObjectABI* grid = FindByName(finder, root, L"L1Grid", 0)) {
+                SetVisibility(grid, 0);
+                if (g_l1Grid != grid) {
+                    if (g_l1Grid)
+                        g_l1Grid->Release();
+                    g_l1Grid = grid;
+                    grid->AddRef();
+                }
+                grid->Release();
+                ++reset;
+            }
+            root->Release();
         }
+        Log(L"panel: reset to main page (%d element(s))", reset);
+        g_panelVisible = false;
 
         if (viewObject)
             viewObject->Release();
@@ -1854,28 +1862,132 @@ static void AddPanelRow(IInspectableABI* content)
     grid->Release();
 }
 
-static void ShowMonitorPanel()
+// ---------------------------------------------------------------------------
+// Brightness sub-page
+//
+// The shell's volume chevron does not expand anything: it replaces the flyout's
+// content with a page that has a back arrow. This does the same - the main grid
+// is collapsed and a sub-page takes its place.
+// ---------------------------------------------------------------------------
+
+static IDependencyObjectABI* g_pageParent = nullptr;
+static IInspectableABI* g_subPage = nullptr;
+
+static void NavigateBack();
+
+struct BackClickHandler : IUnknown
 {
-    if (g_monitorPanel) {
-        g_panelVisible = !g_panelVisible;
-        IDependencyObjectABI* object = nullptr;
-        if (SUCCEEDED(g_monitorPanel->QueryInterface(kIDependencyObject, reinterpret_cast<void**>(&object))) && object) {
-            HRESULT hr = SetVisibility(object, g_panelVisible ? 0 : 1);
-            Log(L"panel: toggled visible=%d hr=0x%08X", g_panelVisible ? 1 : 0, hr);
-            object->Release();
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override
+    {
+        if (!ppv)
+            return E_POINTER;
+        if (riid == kIRoutedEventHandler || riid == IID_IUnknown || riid == kIAgileObject) {
+            *ppv = this;
+            AddRef();
+            return S_OK;
         }
-        return;
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return 2; }
+    ULONG STDMETHODCALLTYPE Release() override { return 1; }
+
+    virtual HRESULT STDMETHODCALLTYPE Invoke(IInspectableABI*, void*)
+    {
+        Log(L"nav: back pressed");
+        NavigateBack();
+        return S_OK;
+    }
+};
+
+static BackClickHandler g_backHandler;
+
+// A button carrying one glyph. Uses a TextBlock in the icon font, the same way
+// the chevron is drawn - a FontIcon composite took the shell down when tried.
+static IInspectableABI* MakeIconButton(const wchar_t* glyph, void* handler)
+{
+    IInspectableABI* button = Activate(L"Windows.UI.Xaml.Controls.Button");
+    if (!button)
+        return nullptr;
+
+    IInspectableABI* text = Activate(L"Windows.UI.Xaml.Controls.TextBlock");
+    if (text) {
+        ITextBlockABI* textBlock = nullptr;
+        if (SUCCEEDED(text->QueryInterface(kITextBlock, reinterpret_cast<void**>(&textBlock))) && textBlock) {
+            HSTRING value = nullptr;
+            g_createString(glyph, 1, &value);
+            textBlock->put_Text(value);
+            g_deleteString(value);
+            textBlock->put_FontSize(16);
+
+            IInspectableABI* family = MakeFontFamily(L"Segoe Fluent Icons");
+            if (family) {
+                textBlock->put_FontFamily(family);
+                family->Release();
+            }
+
+            IInspectableABI* brush = Activate(L"Windows.UI.Xaml.Media.SolidColorBrush");
+            if (brush) {
+                ISolidColorBrushABI* solid = nullptr;
+                if (SUCCEEDED(brush->QueryInterface(kISolidColorBrush, reinterpret_cast<void**>(&solid))) && solid) {
+                    ColorABI white = { 255, 255, 255, 255 };
+                    solid->put_Color(white);
+                    textBlock->put_Foreground(brush);
+                    solid->Release();
+                }
+                brush->Release();
+            }
+            textBlock->Release();
+        }
+
+        IContentControlABI* content = nullptr;
+        if (SUCCEEDED(button->QueryInterface(kIContentControl, reinterpret_cast<void**>(&content))) && content) {
+            content->put_Content(text);
+            content->Release();
+        }
+        text->Release();
     }
 
-    IInspectableABI* panel = Activate(L"Windows.UI.Xaml.Controls.StackPanel");
-    if (!panel) {
-        Log(L"panel: could not create StackPanel");
-        return;
+    IFrameworkElementABI* element = nullptr;
+    if (SUCCEEDED(button->QueryInterface(kIFrameworkElement, reinterpret_cast<void**>(&element))) && element) {
+        element->put_Width(36);
+        element->put_Height(32);
+        element->put_HorizontalAlignment(0);  // Left
+        element->Release();
     }
-    // Named so a later open can find it in whatever tree the shell has built.
-    SetElementName(panel, kPanelName);
 
-    double internalLevel = 0, externalLevel = 0;
+    if (handler) {
+        IButtonBaseABI* base = nullptr;
+        if (SUCCEEDED(button->QueryInterface(kIButtonBase, reinterpret_cast<void**>(&base))) && base) {
+            INT64 token = 0;
+            HRESULT hr = base->add_Click(handler, &token);
+            Log(L"nav: back add_Click 0x%08X", hr);
+            base->Release();
+        }
+    }
+    return button;
+}
+
+static IInspectableABI* BuildBrightnessSubPage()
+{
+    IInspectableABI* page = Activate(L"Windows.UI.Xaml.Controls.StackPanel");
+    if (!page) {
+        Log(L"nav: no StackPanel");
+        return nullptr;
+    }
+    SetElementName(page, L"BCBrightnessPage");
+
+    // Header: back arrow, then the title, matching the shell's sub-pages.
+    if (IInspectableABI* back = MakeIconButton(L"\xE72B", &g_backHandler)) {  // Back
+        AppendChild(page, back);
+        back->Release();
+    }
+    if (IInspectableABI* title = MakeLabel(L"Brightness")) {
+        AppendChild(page, title);
+        title->Release();
+    }
+
+    double internalLevel = 0;
     if (g_stockSlider) {
         IRangeBaseABI* range = nullptr;
         if (SUCCEEDED(reinterpret_cast<IInspectableABI*>(g_stockSlider)->QueryInterface(
@@ -1884,47 +1996,99 @@ static void ShowMonitorPanel()
             range->Release();
         }
     }
-    externalLevel = internalLevel;  // they are mirrored until one is moved alone
 
     g_panelHandlers[0].monitor = 0;
     g_panelHandlers[1].monitor = 1;
 
     if (IInspectableABI* label = MakeLabel(L"This display")) {
-        AppendChild(panel, label);
+        AppendChild(page, label);
         label->Release();
     }
     if (IInspectableABI* slider = MakeSlider(internalLevel, 0)) {
-        AppendChild(panel, slider);
-        g_panelSliders[0] = slider;
-        slider->AddRef();
+        AppendChild(page, slider);
+        if (!g_panelSliders[0]) {
+            g_panelSliders[0] = slider;
+            slider->AddRef();
+        }
         slider->Release();
     }
     if (IInspectableABI* label = MakeLabel(L"Dell P2423D")) {
-        AppendChild(panel, label);
+        AppendChild(page, label);
         label->Release();
     }
-    if (IInspectableABI* slider = MakeSlider(externalLevel, 1)) {
-        AppendChild(panel, slider);
-        g_panelSliders[1] = slider;
-        slider->AddRef();
+    if (IInspectableABI* slider = MakeSlider(internalLevel, 1)) {
+        AppendChild(page, slider);
+        if (!g_panelSliders[1]) {
+            g_panelSliders[1] = slider;
+            slider->AddRef();
+        }
         slider->Release();
     }
 
-    AddPanelRow(panel);
-    g_monitorPanel = panel;
-
-    // Collapsed until the chevron is pressed, which is the whole point of
-    // putting it behind a button.
-    // Built hidden so the panel is not in the flyout until asked for, then
-    // shown immediately: this call came from the chevron.
-    IDependencyObjectABI* panelObject = nullptr;
-    if (SUCCEEDED(panel->QueryInterface(kIDependencyObject, reinterpret_cast<void**>(&panelObject))) && panelObject) {
-        HRESULT hrShow = SetVisibility(panelObject, 0);
-        Log(L"panel: built (visible) hr=0x%08X", hrShow);
-        panelObject->Release();
-    }
-    g_panelVisible = true;
+    Log(L"nav: sub-page built");
+    return page;
 }
+
+static void NavigateToBrightness()
+{
+    if (!g_l1Grid) {
+        Log(L"nav: no L1Grid");
+        return;
+    }
+
+    if (!g_pageParent) {
+        IVisualTreeHelperStaticsABI* helper = GetVisualTreeHelper();
+        IDependencyObjectABI* object = nullptr;
+        if (helper &&
+            SUCCEEDED(reinterpret_cast<IInspectableABI*>(g_l1Grid)->QueryInterface(
+                kIDependencyObject, reinterpret_cast<void**>(&object))) && object) {
+            helper->GetParent(object, &g_pageParent);
+            object->Release();
+        }
+        if (helper)
+            helper->Release();
+    }
+    if (!g_pageParent) {
+        Log(L"nav: L1Grid has no parent");
+        return;
+    }
+
+    if (!g_subPage) {
+        g_subPage = BuildBrightnessSubPage();
+        if (!g_subPage)
+            return;
+        AppendChild(reinterpret_cast<IInspectableABI*>(g_pageParent), g_subPage);
+    }
+
+    // Swap: the shell's grid goes away, the sub-page takes its place.
+    SetVisibility(g_l1Grid, 1);
+    IDependencyObjectABI* pageObject = nullptr;
+    if (SUCCEEDED(g_subPage->QueryInterface(kIDependencyObject, reinterpret_cast<void**>(&pageObject))) && pageObject) {
+        HRESULT hr = SetVisibility(pageObject, 0);
+        Log(L"nav: brightness page shown hr=0x%08X", hr);
+        pageObject->Release();
+    }
+}
+
+static void NavigateBack()
+{
+    if (g_subPage) {
+        IDependencyObjectABI* pageObject = nullptr;
+        if (SUCCEEDED(g_subPage->QueryInterface(kIDependencyObject, reinterpret_cast<void**>(&pageObject))) && pageObject) {
+            SetVisibility(pageObject, 1);
+            pageObject->Release();
+        }
+    }
+    if (g_l1Grid)
+        SetVisibility(g_l1Grid, 0);
+    Log(L"nav: back to main");
+}
+
+static void ShowMonitorPanel()
+{
+    NavigateToBrightness();
+}
+
 
 
 static int Hook_OnGotFocus(void* self, void* args)
@@ -1932,15 +2096,14 @@ static int Hook_OnGotFocus(void* self, void* args)
     // Nothing XAML-touching here: capture the view, post the work, get out.
     Log(L"hook entered: this=0x%p", self);
     RememberView(self);
-    if (!g_monitorPanel) {
-        static bool inspected = false;
-        if (!inspected) {
-            inspected = true;
-            g_pendingAction = 0;
-            QueueDeferredInspect(self);
-        }
+    static bool inspected = false;
+    if (!inspected) {
+        inspected = true;
+        g_pendingAction = 0;
+        QueueDeferredInspect(self);
     } else {
-        // The panel already exists, so this open only has to hide it again.
+        // Every later open resets to the main page, in case the flyout was left
+        // on the brightness sub-page.
         g_pendingAction = 1;
         QueueDeferredInspect(self);
     }
