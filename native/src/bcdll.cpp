@@ -1343,20 +1343,162 @@ static const IID kIDispatcherQueueHandler = { 0xdfa2dc9c, 0x1a2d, 0x4917, { 0x98
 // TryEnqueue refuses a handler that is not agile: 0x8000001C, "The object must
 // support the IAgileObject interface".
 
+// The shell rebuilds the flyout's content, so a cached panel pointer goes stale
+// and hiding it silently does nothing. Everything goes through the current tree,
+// finding the panel by name.
+static const wchar_t* kPanelName = L"BCMonitorPanel";
+
+// put_Name is IFrameworkElement method 28 (slot 34).
+static void SetElementName(IInspectableABI* element, const wchar_t* name)
+{
+    IFrameworkElementABI* framework = nullptr;
+    if (FAILED(element->QueryInterface(kIFrameworkElement, reinterpret_cast<void**>(&framework))) || !framework)
+        return;
+    void** vtable = *reinterpret_cast<void***>(framework);
+    typedef HRESULT (STDMETHODCALLTYPE* PutNameFn)(void*, HSTRING);
+    auto putName = reinterpret_cast<PutNameFn>(vtable[34]);
+    if (putName) {
+        HSTRING value = nullptr;
+        g_createString(name, static_cast<UINT32>(wcslen(name)), &value);
+        putName(framework, value);
+        g_deleteString(value);
+    }
+    framework->Release();
+}
+
+// Visibility lives on IUIElement. Calling it through a DependencyObject pointer
+// is a wild vtable call - it returns an error and hides nothing, which is why
+// the panel kept showing.
+static HRESULT SetVisibility(IDependencyObjectABI* node, int visibility)
+{
+    if (!node)
+        return E_POINTER;
+    IInspectableABI* element = nullptr;
+    if (FAILED(reinterpret_cast<IInspectableABI*>(node)->QueryInterface(
+            kIUIElement, reinterpret_cast<void**>(&element))) || !element)
+        return E_NOINTERFACE;
+    HRESULT hr = reinterpret_cast<IUIElementVisibilityABI*>(element)->put_Visibility(visibility);
+    element->Release();
+    return hr;
+}
+
+static int CollapseAllByName(IVisualTreeHelperStaticsABI* helper, IDependencyObjectABI* node,
+                             const wchar_t* name, int depth)
+{
+    if (depth > 24 || !node)
+        return 0;
+
+    int collapsed = 0;
+
+    wchar_t elementName[128] = {};
+    GetElementName(node, elementName, 128);
+    if (wcscmp(elementName, name) == 0) {
+        HRESULT hr = SetVisibility(node, 1);
+        Log(L"panel: hide -> 0x%08X", hr);
+        if (SUCCEEDED(hr))
+            ++collapsed;
+    }
+
+    UINT32 count = 0;
+    if (FAILED(helper->GetChildrenCount(node, &count)))
+        return collapsed;
+
+    for (UINT32 i = 0; i < count; ++i) {
+        IDependencyObjectABI* child = nullptr;
+        if (FAILED(helper->GetChild(node, static_cast<INT32>(i), &child)) || !child)
+            continue;
+        collapsed += CollapseAllByName(helper, child, name, depth + 1);
+        child->Release();
+    }
+    return collapsed;
+}
+
+static IDependencyObjectABI* FindByName(IVisualTreeHelperStaticsABI* helper, IDependencyObjectABI* node,
+                                        const wchar_t* name, int depth)
+{
+    if (depth > 24 || !node)
+        return nullptr;
+
+    wchar_t elementName[128] = {};
+    GetElementName(node, elementName, 128);
+    if (wcscmp(elementName, name) == 0) {
+        node->AddRef();
+        return node;
+    }
+
+    UINT32 count = 0;
+    if (FAILED(helper->GetChildrenCount(node, &count)))
+        return nullptr;
+
+    for (UINT32 i = 0; i < count; ++i) {
+        IDependencyObjectABI* child = nullptr;
+        if (FAILED(helper->GetChild(node, static_cast<INT32>(i), &child)) || !child)
+            continue;
+        IDependencyObjectABI* found = FindByName(helper, child, name, depth + 1);
+        child->Release();
+        if (found)
+            return found;
+    }
+    return nullptr;
+}
+
 static void* g_pendingView = nullptr;
+static void* g_views[8] = {};
+static int g_viewCount = 0;
+static void RememberView(void* view)
+{
+    if (!view)
+        return;
+    for (int i = 0; i < g_viewCount; ++i)
+        if (g_views[i] == view)
+            return;
+    if (g_viewCount < 8)
+        g_views[g_viewCount++] = view;
+}
 static int g_pendingAction = 0;  // 0 = inspect, 1 = collapse panel
 
 static void DoDeferredInspect()
 {
     if (g_pendingAction == 1) {
-        // Every time the flyout opens the panel starts collapsed. Without this
-        // it stays visible for the life of the process after the first chevron
-        // press, which is exactly how it looked on reopen.
-        if (g_monitorPanel) {
-            reinterpret_cast<IUIElementVisibilityABI*>(g_monitorPanel)->put_Visibility(1);
-            g_panelVisible = false;
-            Log(L"panel: collapsed on open");
+        // Every open starts collapsed. The shell rebuilds the flyout's content,
+        // so the panel is looked up in the current tree rather than trusted from
+        // a cached pointer - hiding a stale element silently does nothing.
+        IVisualTreeHelperStaticsABI* finder = GetVisualTreeHelper();
+        IDependencyObjectABI* viewObject = nullptr;
+        IDependencyObjectABI* live = nullptr;
+
+        if (finder && g_pendingView &&
+            SUCCEEDED(reinterpret_cast<IInspectableABI*>(g_pendingView)->QueryInterface(
+                kIDependencyObject, reinterpret_cast<void**>(&viewObject))) && viewObject) {
+            live = FindByName(finder, viewObject, kPanelName, 0);
         }
+
+        int collapsed = 0;
+        for (int v = 0; v < g_viewCount; ++v) {
+            IDependencyObjectABI* root = nullptr;
+            if (SUCCEEDED(reinterpret_cast<IInspectableABI*>(g_views[v])->QueryInterface(
+                    kIDependencyObject, reinterpret_cast<void**>(&root))) && root) {
+                collapsed += CollapseAllByName(finder, root, kPanelName, 0);
+                root->Release();
+            }
+        }
+
+        if (collapsed > 0) {
+            Log(L"panel: collapsed %d instance(s) on open", collapsed);
+            g_panelVisible = false;
+        } else if (g_monitorPanel) {
+            Log(L"panel: gone from the tree - dropping the stale reference");
+            g_monitorPanel->Release();
+            g_monitorPanel = nullptr;
+            g_panelVisible = false;
+        } else {
+            Log(L"panel: nothing to collapse");
+        }
+
+        if (viewObject)
+            viewObject->Release();
+        if (finder)
+            finder->Release();
         return;
     }
 
@@ -1716,9 +1858,12 @@ static void ShowMonitorPanel()
 {
     if (g_monitorPanel) {
         g_panelVisible = !g_panelVisible;
-        reinterpret_cast<IUIElementVisibilityABI*>(g_monitorPanel)
-            ->put_Visibility(g_panelVisible ? 0 : 1);
-        Log(L"panel: toggled visible=%d", g_panelVisible ? 1 : 0);
+        IDependencyObjectABI* object = nullptr;
+        if (SUCCEEDED(g_monitorPanel->QueryInterface(kIDependencyObject, reinterpret_cast<void**>(&object))) && object) {
+            HRESULT hr = SetVisibility(object, g_panelVisible ? 0 : 1);
+            Log(L"panel: toggled visible=%d hr=0x%08X", g_panelVisible ? 1 : 0, hr);
+            object->Release();
+        }
         return;
     }
 
@@ -1727,6 +1872,8 @@ static void ShowMonitorPanel()
         Log(L"panel: could not create StackPanel");
         return;
     }
+    // Named so a later open can find it in whatever tree the shell has built.
+    SetElementName(panel, kPanelName);
 
     double internalLevel = 0, externalLevel = 0;
     if (g_stockSlider) {
@@ -1770,9 +1917,13 @@ static void ShowMonitorPanel()
     // putting it behind a button.
     // Built hidden so the panel is not in the flyout until asked for, then
     // shown immediately: this call came from the chevron.
-    reinterpret_cast<IUIElementVisibilityABI*>(panel)->put_Visibility(0);
+    IDependencyObjectABI* panelObject = nullptr;
+    if (SUCCEEDED(panel->QueryInterface(kIDependencyObject, reinterpret_cast<void**>(&panelObject))) && panelObject) {
+        HRESULT hrShow = SetVisibility(panelObject, 0);
+        Log(L"panel: built (visible) hr=0x%08X", hrShow);
+        panelObject->Release();
+    }
     g_panelVisible = true;
-    Log(L"panel: built (visible)");
 }
 
 
@@ -1780,6 +1931,7 @@ static int Hook_OnGotFocus(void* self, void* args)
 {
     // Nothing XAML-touching here: capture the view, post the work, get out.
     Log(L"hook entered: this=0x%p", self);
+    RememberView(self);
     if (!g_monitorPanel) {
         static bool inspected = false;
         if (!inspected) {
