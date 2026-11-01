@@ -298,9 +298,213 @@ struct IPropertyValueStaticsABI : IInspectableABI
 
 static const IID kIPropertyValueStatics = { 0x629bdbc8, 0xd932, 0x4ff4, { 0x96, 0xb9, 0x8d, 0x96, 0xc5, 0xc1, 0xe8, 0x58 } };
 
+static const IID kIAgileObject = { 0x94ea2b94, 0xe9cc, 0x49e0, { 0xc0, 0xff, 0xee, 0x64, 0xca, 0x8f, 0x5b, 0x90 } };
 static const IID kIGrid = { 0xfd104460, 0x2e15, 0x4ba3, { 0x8b, 0x8f, 0xfa, 0x69, 0x3a, 0x41, 0x61, 0xe9 } };
 static const IID kIRowDefinition = { 0x4abae829, 0xd80c, 0x4a5e, { 0xa4, 0x8c, 0xf8, 0xb3, 0xd3, 0xb6, 0x53, 0x3d } };
 static const IID kIGridStatics = { 0x64fe2e9f, 0xf951, 0x42b6, { 0xa9, 0xce, 0xbb, 0x17, 0x9a, 0xf1, 0x15, 0x95 } };
+
+// ---------------------------------------------------------------------------
+// DDC/CI for the external panel
+// ---------------------------------------------------------------------------
+
+#include <physicalmonitorenumerationapi.h>
+#include <lowlevelmonitorconfigurationapi.h>
+#pragma comment(lib, "dxva2.lib")
+
+static HANDLE g_ddcEvent = nullptr;
+static volatile LONG g_pendingBrightness = -1;
+static PHYSICAL_MONITOR g_externalMonitor = {};
+static bool g_haveExternal = false;
+
+static BOOL CALLBACK FindExternalMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM)
+{
+    if (g_haveExternal)
+        return FALSE;
+
+    // Pick by capability, not by "is it primary": on this machine the Dell is
+    // the primary display and the laptop panel is the one with no DDC handle.
+    MONITORINFO info = { sizeof(info) };
+    GetMonitorInfoW(monitor, &info);
+    Log(L"ddc: monitor %ld,%ld %ldx%ld primary=%d",
+        info.rcMonitor.left, info.rcMonitor.top,
+        info.rcMonitor.right - info.rcMonitor.left,
+        info.rcMonitor.bottom - info.rcMonitor.top,
+        (info.dwFlags & MONITORINFOF_PRIMARY) ? 1 : 0);
+
+    DWORD count = 0;
+    if (!GetNumberOfPhysicalMonitorsFromHMONITOR(monitor, &count)) {
+        Log(L"ddc:   GetNumberOfPhysicalMonitors failed %lu", GetLastError());
+        return TRUE;
+    }
+    Log(L"ddc:   %lu physical monitor(s)", count);
+    if (count == 0)
+        return TRUE;
+
+    PHYSICAL_MONITOR* monitors = static_cast<PHYSICAL_MONITOR*>(
+        HeapAlloc(GetProcessHeap(), 0, count * sizeof(PHYSICAL_MONITOR)));
+    if (!monitors)
+        return TRUE;
+
+    if (GetPhysicalMonitorsFromHMONITOR(monitor, count, monitors)) {
+        for (DWORD i = 0; i < count && !g_haveExternal; ++i) {
+            if (!monitors[i].hPhysicalMonitor)
+                continue;
+            DWORD current = 0, maximum = 0;
+            BOOL ok = GetVCPFeatureAndVCPFeatureReply(monitors[i].hPhysicalMonitor, 0x10,
+                                                      nullptr, &current, &maximum);
+            Log(L"ddc:   [%lu] '%s' handle=0x%p vcp10=%d err=%lu",
+                i, monitors[i].szPhysicalMonitorDescription, monitors[i].hPhysicalMonitor,
+                ok ? 1 : 0, ok ? 0 : GetLastError());
+            if (ok) {
+                g_externalMonitor = monitors[i];
+                g_haveExternal = true;
+                Log(L"ddc: using '%s' (handle 0x%p), brightness %lu/%lu",
+                    monitors[i].szPhysicalMonitorDescription, monitors[i].hPhysicalMonitor,
+                    current, maximum);
+            }
+        }
+
+        for (DWORD i = 0; i < count; ++i) {
+            if (g_haveExternal && &monitors[i] == &g_externalMonitor)
+                continue;
+            if (g_haveExternal && monitors[i].hPhysicalMonitor == g_externalMonitor.hPhysicalMonitor)
+                continue;
+            DestroyPhysicalMonitor(monitors[i].hPhysicalMonitor);
+        }
+    } else {
+        Log(L"ddc: GetPhysicalMonitorsFromHMONITOR failed %lu", GetLastError());
+    }
+
+    HeapFree(GetProcessHeap(), 0, monitors);
+    return g_haveExternal ? FALSE : TRUE;
+}
+
+static void SetExternalBrightness(int value)
+{
+    if (!g_haveExternal) {
+        EnumDisplayMonitors(nullptr, nullptr, FindExternalMonitor, 0);
+        if (!g_haveExternal) {
+            Log(L"ddc: no external monitor found");
+            return;
+        }
+    }
+    DWORD current = 0, maximum = 100;
+    if (!SetVCPFeature(g_externalMonitor.hPhysicalMonitor, 0x10, static_cast<DWORD>(value))) {
+        Log(L"ddc: SetVCPFeature failed %lu", GetLastError());
+        g_haveExternal = false;  // re-enumerate next time
+    }
+    (void)current;
+    (void)maximum;
+}
+
+static DWORD WINAPI DdcWorker(LPVOID)
+{
+    for (;;) {
+        WaitForSingleObject(g_ddcEvent, INFINITE);
+        // Coalesce: only the newest value matters while the user drags.
+        LONG value = InterlockedExchange(&g_pendingBrightness, -1);
+        while (value >= 0) {
+            SetExternalBrightness(static_cast<int>(value));
+            value = InterlockedExchange(&g_pendingBrightness, -1);
+        }
+    }
+}
+
+static void QueueExternalBrightness(double value)
+{
+    if (value < 0) value = 0;
+    if (value > 100) value = 100;
+    InterlockedExchange(&g_pendingBrightness, static_cast<LONG>(value));
+    if (g_ddcEvent)
+        SetEvent(g_ddcEvent);
+}
+
+// ---------------------------------------------------------------------------
+// The stock brightness slider
+// ---------------------------------------------------------------------------
+
+// fa002c1a-494e-46cf-91d4-e14a8d798675 - Value at slot 14, add_ValueChanged 16.
+struct IRangeBaseABI : IInspectableABI
+{
+    virtual void* unused0();
+    virtual void* unused1();
+    virtual void* unused2();                                     // slot 8  get_Maximum
+    virtual void* unused3();
+    virtual void* unused4();
+    virtual void* unused5();
+    virtual void* unused6();
+    virtual void* unused7();
+    virtual HRESULT STDMETHODCALLTYPE get_Value(double* value) = 0;   // slot 14
+    virtual HRESULT STDMETHODCALLTYPE put_Value(double value) = 0;    // slot 15
+    virtual HRESULT STDMETHODCALLTYPE add_ValueChanged(void* handler,
+                                                      INT64* token) = 0;  // slot 16
+};
+
+// e3906fd9-4d1b-4ac8-a43c-c3b908742799
+static const IID kIRangeBase = { 0xfa002c1a, 0x494e, 0x46cf, { 0x91, 0xd4, 0xe1, 0x4a, 0x8d, 0x79, 0x86, 0x75 } };
+static const IID kIRangeBaseValueChangedHandler = { 0xe3906fd9, 0x4d1b, 0x4ac8, { 0xa4, 0x3c, 0xc3, 0xb9, 0x08, 0x74, 0x27, 0x99 } };
+
+struct ValueChangedHandler : IUnknown
+{
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override
+    {
+        if (!ppv)
+            return E_POINTER;
+        if (riid == kIRangeBaseValueChangedHandler || riid == IID_IUnknown || riid == kIAgileObject) {
+            *ppv = this;
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return 2; }
+    ULONG STDMETHODCALLTYPE Release() override { return 1; }
+
+    // Invoke(IInspectable* sender, IRangeBaseValueChangedEventArgs* e)
+    virtual HRESULT STDMETHODCALLTYPE Invoke(IInspectableABI* sender, void*)
+    {
+        IRangeBaseABI* range = nullptr;
+        if (sender && SUCCEEDED(sender->QueryInterface(kIRangeBase, reinterpret_cast<void**>(&range))) && range) {
+            double value = 0;
+            if (SUCCEEDED(range->get_Value(&value)))
+                QueueExternalBrightness(value);
+            range->Release();
+        }
+        return S_OK;
+    }
+};
+
+static ValueChangedHandler g_valueChangedHandler;
+static IDependencyObjectABI* g_stockSlider = nullptr;
+
+static void AttachStockSlider()
+{
+    if (!g_stockSlider) {
+        Log(L"stock slider: not captured");
+        return;
+    }
+
+    IRangeBaseABI* range = nullptr;
+    HRESULT hr = reinterpret_cast<IInspectableABI*>(g_stockSlider)->QueryInterface(
+        kIRangeBase, reinterpret_cast<void**>(&range));
+    Log(L"stock slider: QI IRangeBase 0x%08X", hr);
+    if (FAILED(hr) || !range)
+        return;
+
+    double value = 0;
+    range->get_Value(&value);
+    Log(L"stock slider: current value %.0f", value);
+
+    INT64 token = 0;
+    hr = range->add_ValueChanged(&g_valueChangedHandler, &token);
+    Log(L"stock slider: add_ValueChanged 0x%08X", hr);
+    range->Release();
+
+    // Push the current level to the external panel once, so the two agree
+    // before the user touches anything.
+    QueueExternalBrightness(value);
+}
 
 static IVisualTreeHelperStaticsABI* GetVisualTreeHelper()
 {
@@ -654,7 +858,7 @@ static void InsertPanelIntoGrid()
 static void SearchSliders(IVisualTreeHelperStaticsABI* helper, IDependencyObjectABI* node,
                           int depth, int* hits)
 {
-    if (depth > 22 || *hits > 24)
+    if (depth > 30 || *hits > 24)
         return;
 
     UINT32 count = 0;
@@ -694,6 +898,15 @@ static void SearchSliders(IVisualTreeHelperStaticsABI* helper, IDependencyObject
             Log(L"--- SlidersGroup subtree ---");
             WalkTree(helper, child, 0);
             Log(L"--- end subtree ---");
+            int groupHits = 0;
+            SearchSliders(helper, child, 0, &groupHits);
+            Log(L"sliders under SlidersGroup: %d", groupHits);
+        }
+
+        if (wcsstr(className, L"Slider") && !g_stockSlider) {
+            child->AddRef();
+            g_stockSlider = child;
+            Log(L"captured stock slider: %s %.0fx%.0f", className, width, height);
         }
 
         if (wcsstr(className, L"Slider") || wcsstr(className, L"Brightness")) {
@@ -762,6 +975,7 @@ static void InspectView(void* self)
     Log(L"slider hits: %d", hits);
 
     InsertPanelIntoGrid();
+    AttachStockSlider();
 
     node->Release();
     root->Release();
@@ -831,7 +1045,6 @@ static const IID kIDispatcherQueue = { 0x603e88e4, 0xa338, 0x4ffe, { 0xa4, 0x57,
 static const IID kIDispatcherQueueHandler = { 0xdfa2dc9c, 0x1a2d, 0x4917, { 0x98, 0xf2, 0x93, 0x9a, 0xf1, 0xd6, 0xe0, 0xc8 } };
 // TryEnqueue refuses a handler that is not agile: 0x8000001C, "The object must
 // support the IAgileObject interface".
-static const IID kIAgileObject = { 0x94ea2b94, 0xe9cc, 0x49e0, { 0xc0, 0xff, 0xee, 0x64, 0xca, 0x8f, 0x5b, 0x90 } };
 
 static void* g_pendingView = nullptr;
 
@@ -937,6 +1150,13 @@ static DWORD WINAPI InitThread(LPVOID module)
     // imported by the host, so it may or may not be mapped yet. Whichever it is
     // tells us which discovery path to take next.
     ResolveHStringHelpers();
+
+    g_ddcEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (g_ddcEvent) {
+        HANDLE thread = CreateThread(nullptr, 0, DdcWorker, nullptr, 0, nullptr);
+        if (thread)
+            CloseHandle(thread);
+    }
 
     HMODULE controlCenter = GetModuleHandleW(L"ControlCenter.dll");
     Log(L"ControlCenter.dll %s (0x%p)",
