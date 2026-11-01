@@ -299,52 +299,45 @@ namespace BrightnessControl
         /// </summary>
         private static Rectangle MeasureCard(Rectangle container, Rectangle skip)
         {
-            if (container.Width <= 0 || container.Height <= 0) return Rectangle.Empty;
             int inset = 15;
             int left = container.Left + inset;
             int width = container.Width - inset * 2;
 
-            // Copy two 1 px columns rather than the whole 480x1400 container: the scan only
-            // needs one column inside the card and one in the container's padding.
-            int midX = container.Width / 2;
-            int padX = 8;
+            // Compare two columns only 8 px apart, either side of the card's left edge. The
+            // desktop behind the flyout varies wildly across the panel, so comparing distant
+            // columns (as an earlier version did) reads the wallpaper and lands anywhere.
+            int inX = left + 4;
+            int outX = left - 4;
 
-            using (Bitmap mid = new Bitmap(1, container.Height))
-            using (Bitmap pad = new Bitmap(1, container.Height))
+            using (Bitmap inside = new Bitmap(1, container.Height))
+            using (Bitmap outside = new Bitmap(1, container.Height))
             {
-                using (Graphics g = Graphics.FromImage(mid))
-                    g.CopyFromScreen(container.Left + midX, container.Top, 0, 0, new Size(1, container.Height));
-                using (Graphics g = Graphics.FromImage(pad))
-                    g.CopyFromScreen(container.Left + padX, container.Top, 0, 0, new Size(1, container.Height));
+                using (Graphics g = Graphics.FromImage(inside))
+                    g.CopyFromScreen(inX, container.Top, 0, 0, new Size(1, container.Height));
+                using (Graphics g = Graphics.FromImage(outside))
+                    g.CopyFromScreen(outX, container.Top, 0, 0, new Size(1, container.Height));
 
-                // Stop just above our own card: everything below it is our own pixels or empty
-                // background, and including it makes the scan measure itself.
-                int startY = container.Height - 1;
-                if (skip != Rectangle.Empty && skip.Top > container.Top)
-                    startY = Math.Min(startY, skip.Top - container.Top - 1);
-
+                // Walk down from inside the card; the first run of rows where both columns
+                // match is past the card's bottom edge.
+                int blankRun = 0;
                 int bottom = -1;
-                for (int y = startY; y > inset; y--)
+                for (int y = inset + 14; y < container.Height; y++)
                 {
-                    Color a = mid.GetPixel(0, y);
-                    Color b = pad.GetPixel(0, y);
+                    Color a = inside.GetPixel(0, y);
+                    Color b = outside.GetPixel(0, y);
                     int diff = Math.Abs(a.R - b.R) + Math.Abs(a.G - b.G) + Math.Abs(a.B - b.B);
-                    if (diff <= 8) continue;
-
-                    // require a few consistent rows so a stray shadow pixel does not win
-                    int run = 0;
-                    for (int k = 0; k < 6 && y - k > 0; k++)
+                    if (diff <= 6)
                     {
-                        Color a2 = mid.GetPixel(0, y - k);
-                        Color b2 = pad.GetPixel(0, y - k);
-                        if (Math.Abs(a2.R - b2.R) + Math.Abs(a2.G - b2.G) + Math.Abs(a2.B - b2.B) > 8) run++;
+                        blankRun++;
+                        if (blankRun >= 6) { bottom = y - blankRun + 6; break; }
                     }
-                    if (run >= 5) { bottom = y; break; }
+                    else blankRun = 0;
                 }
 
                 if (bottom < 0) return Rectangle.Empty;
-                // 'bottom' is a row inside the captured column; convert back to screen space.
-                return new Rectangle(left, container.Top + bottom + 1, width, QuickSettingsCard.CardHeight);
+                // the left edge curves in for the last few px of the rounded corner
+                bottom += 6;
+                return new Rectangle(left, container.Top + bottom, width, QuickSettingsCard.CardHeight);
             }
         }
 
