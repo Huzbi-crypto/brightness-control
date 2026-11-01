@@ -272,3 +272,33 @@ insert: footer SetValue(Grid.Row, 3) 0x00000000
 
 Verified on screen: the row sits between the volume slider and the
 battery/settings row, and ShellHost survives repeated open/close cycles.
+
+## The shell's own slider now drives both panels
+
+`bcdll.dll` attaches to the stock brightness control - which is
+`ControlCenter.AsyncSlider`, not a plain `Slider`, but it implements `IRangeBase`
+- and publishes its level to a shared page. `bcsync.exe` waits on a named event
+and writes the Dell over DDC/CI. Verified end to end:
+
+```
+dell before: 67
+internal -> 40  =>  dell 40
+internal -> 75  =>  dell 75
+```
+
+`bcsync.exe` costs 6.5 MB and has no UI, no window and no polling loop; it sleeps
+on the event. That replaces the 37 MB WinForms app and the Windhawk mod entirely.
+
+### Two bugs worth remembering
+
+**The helper never reached the DDC display.** Its monitor buffer had moved to a
+stack array but the `HeapFree` on it stayed, so it corrupted the heap and died
+after the first monitor - and the first monitor is the laptop panel, which has no
+DDC handle. Every run looked like "DDC is impossible from native code". Guard the
+free and it reads the Dell immediately.
+
+**The managed probe that "worked" was reading an undersized struct.**
+`[MarshalAs(ByValTStr, SizeConst = 128)]` marshals 128 *bytes*, not 128 WCHARs,
+so its `PHYSICAL_MONITOR` is 136 bytes instead of 264. The handle happens to be
+first, so it read a valid handle out of a buffer the API overflowed. That is why
+the same enumeration appeared to work from a managed process and fail natively.
