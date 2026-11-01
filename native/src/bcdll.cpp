@@ -474,26 +474,122 @@ static void WalkLight(IVisualTreeHelperStaticsABI* helper, IDependencyObjectABI*
     }
 }
 
-static int Hook_OnGotFocus(void* self, void* args)
-{
-    Log(L"hook entered: this=0x%p args=0x%p", self, args);
+// ---------------------------------------------------------------------------
+// Dispatcher deferral
+//
+// The XAML work must not run inside the focus event: doing it there takes
+// ShellHost down with 0xc000001d right after the calls return. So the hook only
+// captures the view and posts the work to the thread's dispatcher queue.
+// ---------------------------------------------------------------------------
 
-    static bool done = false;
-    if (!done) {
-        done = true;
-        IVisualTreeHelperStaticsABI* helper = GetVisualTreeHelper();
-        if (helper) {
-            IDependencyObjectABI* root = nullptr;
-            if (SUCCEEDED(reinterpret_cast<IInspectableABI*>(self)->QueryInterface(
-                    kIDependencyObject, reinterpret_cast<void**>(&root))) && root) {
-                WalkLight(helper, root, 0);
-                root->Release();
-            }
-            helper->Release();
+struct IDispatcherQueueABI;
+
+// a96d83d7-9371-4517-9245-d0824ac12c74
+struct IDispatcherQueueStaticsABI : IInspectableABI
+{
+    virtual HRESULT STDMETHODCALLTYPE GetForCurrentThread(IDispatcherQueueABI** result) = 0;
+};
+
+// 603e88e4-a338-4ffe-a457-a5cfb9ceb899
+struct IDispatcherQueueABI : IInspectableABI
+{
+    virtual HRESULT STDMETHODCALLTYPE CreateTimer(void** result) = 0;
+    virtual HRESULT STDMETHODCALLTYPE TryEnqueue(void* callback, BOOL* result) = 0;
+};
+
+static const IID kIDispatcherQueueStatics = { 0xa96d83d7, 0x9371, 0x4517, { 0x92, 0x45, 0xd0, 0x82, 0x4a, 0xc1, 0x2c, 0x74 } };
+static const IID kIDispatcherQueue = { 0x603e88e4, 0xa338, 0x4ffe, { 0xa4, 0x57, 0xa5, 0xcf, 0xb9, 0xce, 0xb8, 0x99 } };
+static const IID kIDispatcherQueueHandler = { 0xdfa2dc9c, 0x1a2d, 0x4917, { 0x98, 0xf2, 0x93, 0x9a, 0xf1, 0xd6, 0xe0, 0xc8 } };
+
+static void* g_pendingView = nullptr;
+
+static void DoDeferredInspect()
+{
+    void* view = g_pendingView;
+    Log(L"deferred callback: view=0x%p", view);
+    if (view)
+        InspectView(view);
+    Log(L"deferred callback: done");
+}
+
+// A minimal IDispatcherQueueHandler: the three IUnknown slots, then Invoke.
+struct QueueHandler : IUnknown
+{
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override
+    {
+        if (!ppv)
+            return E_POINTER;
+        if (riid == kIDispatcherQueueHandler || riid == IID_IUnknown) {
+            *ppv = this;
+            AddRef();
+            return S_OK;
         }
-        Log(L"walk complete");
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return 2; }
+    ULONG STDMETHODCALLTYPE Release() override { return 1; }
+
+    virtual HRESULT STDMETHODCALLTYPE Invoke()
+    {
+        DoDeferredInspect();
+        return S_OK;
+    }
+};
+
+static QueueHandler g_handler;
+
+static void QueueDeferredInspect(void* view)
+{
+    g_pendingView = view;
+
+    const wchar_t* className = L"Windows.System.DispatcherQueue";
+    HSTRING name = nullptr;
+    if (FAILED(g_createString(className, static_cast<UINT32>(wcslen(className)), &name)) || !name) {
+        Log(L"DispatcherQueue: HSTRING failed");
+        return;
     }
 
+    void* factory = nullptr;
+    HRESULT hr = g_roGetActivationFactory(name, kIActivationFactory, &factory);
+    g_deleteString(name);
+    if (FAILED(hr) || !factory) {
+        Log(L"DispatcherQueue factory: 0x%08X", hr);
+        return;
+    }
+
+    auto inspectable = reinterpret_cast<IInspectableABI*>(factory);
+    IDispatcherQueueStaticsABI* statics = nullptr;
+    hr = inspectable->QueryInterface(kIDispatcherQueueStatics, reinterpret_cast<void**>(&statics));
+    inspectable->Release();
+    if (FAILED(hr) || !statics) {
+        Log(L"QI IDispatcherQueueStatics: 0x%08X", hr);
+        return;
+    }
+
+    IDispatcherQueueABI* queue = nullptr;
+    hr = statics->GetForCurrentThread(&queue);
+    statics->Release();
+    if (FAILED(hr) || !queue) {
+        Log(L"GetForCurrentThread: 0x%08X", hr);
+        return;
+    }
+
+    BOOL queued = FALSE;
+    hr = queue->TryEnqueue(&g_handler, &queued);
+    Log(L"TryEnqueue: 0x%08X queued=%d", hr, queued);
+    queue->Release();
+}
+
+static int Hook_OnGotFocus(void* self, void* args)
+{
+    // Nothing XAML-touching here: capture the view, post the work, get out.
+    static bool queued = false;
+    if (!queued) {
+        queued = true;
+        Log(L"hook entered: this=0x%p", self);
+        QueueDeferredInspect(self);
+    }
     return g_onGotFocus(self, args);
 }
 
@@ -530,7 +626,12 @@ static DWORD WINAPI InitThread(LPVOID module)
         return 0;
     }
 
-    void* trampoline = InstallDetour(target, 5, reinterpret_cast<const void*>(&Hook_OnGotFocus));
+    // 6, not 5: the prologue is `40 53` (push rbx, two bytes - 0x40 is a REX
+    // prefix) followed by `48 83 EC 40` (sub rsp,0x40, four bytes). Stealing 5
+    // splits the sub in half, the trampoline runs it with the wrong immediate,
+    // and the stack comes back 8 bytes out - ShellHost then dies with
+    // 0xc000001d. The E9 patch is still 5 bytes; the sixth is padded with NOP.
+    void* trampoline = InstallDetour(target, 6, reinterpret_cast<const void*>(&Hook_OnGotFocus));
     if (!trampoline) {
         Log(L"OnGotFocus: detour install failed");
         return 0;
